@@ -13,6 +13,7 @@ local.properties
 *.pem
 .env
 .env.*
+.api_keys.json
 secrets.properties
 keystore.properties
 

@@ -12,17 +12,17 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.text.Editable;
-import android.text.TextWatcher;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.*;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -30,170 +30,86 @@ import java.util.HashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** 原生 Android 界面。SQLite 保存词库，API 请求在后台线程运行。 */
+/** Android UI for local vocabulary, batch import, AI scene clustering and review. */
 public class MainActivity extends Activity {
-    private final int green=Color.rgb(25,103,79), ink=Color.rgb(23,47,44), paper=Color.rgb(246,247,242), muted=Color.rgb(100,119,114);
-    private SQLiteDatabase db;
-    private LinearLayout body;
-    private SharedPreferences prefs;
-    private JSONArray profiles;
-    private String active="默认", tab="add";
-    private JSONObject demos;
-    private boolean busy=false;
-    private final HashMap<String,String> sessionKeys=new HashMap<>();
+    private final int green=Color.rgb(43,92,84), ink=Color.rgb(28,41,40), paper=Color.rgb(247,247,243), muted=Color.rgb(103,116,112);
+    private SQLiteDatabase db; private DataStore store; private KeyVault vault;
+    private LinearLayout body; private SharedPreferences prefs; private JSONArray profiles;
+    private String active="默认", tab="import"; private boolean busy=false;
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
 
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
-        prefs=getSharedPreferences("api_profiles", MODE_PRIVATE);
-        try {
-            db=openOrCreateDatabase("words.db", MODE_PRIVATE, null);
-            db.execSQL("CREATE TABLE IF NOT EXISTS words(word TEXT PRIMARY KEY,content TEXT NOT NULL,stage INTEGER NOT NULL DEFAULT 0,due TEXT NOT NULL)");
-            try(InputStream in=getAssets().open("demo.json")) { demos=new JSONObject(read(in, 100000)); }
-            profiles=new JSONArray(prefs.getString("profiles", "[]"));
-            if(profiles.length()==0) profiles.put(new JSONObject().put("name","默认").put("base","https://api.openai.com/v1").put("model","gpt-4.1-mini").put("responses",false));
-            active=prefs.getString("active", "默认");
-            if(profile(active)==null) active=profiles.getJSONObject(0).getString("name");
-            home();
-        } catch(Exception e) { new AlertDialog.Builder(this).setTitle("无法打开词库").setMessage("本地文件读取失败。请保留应用数据，不要卸载，联系开发者处理。").setPositiveButton("关闭",(d,w)->finish()).show(); }
-    }
+    @Override public void onCreate(Bundle state){super.onCreate(state);prefs=getSharedPreferences("api_profiles",MODE_PRIVATE);vault=new KeyVault(this);try{
+        db=openOrCreateDatabase("words.db",MODE_PRIVATE,null);store=new DataStore(db);
+        profiles=new JSONArray(prefs.getString("profiles","[]"));if(profiles.length()==0)profiles.put(new JSONObject().put("name","默认").put("base","https://api.openai.com/v1").put("model","gpt-4.1-mini").put("responses",true));
+        active=prefs.getString("active","默认");if(profile(active)==null)active=profiles.getJSONObject(0).getString("name");home();
+    }catch(Exception e){new AlertDialog.Builder(this).setTitle("无法打开词库").setMessage("迁移或读取本地数据失败。请不要卸载应用，以免丢失旧数据。").setPositiveButton("关闭",(d,w)->finish()).show();}}
 
-    private int dp(int n){return (int)(n*getResources().getDisplayMetrics().density+.5f);}
-    private GradientDrawable bg(int color,int radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));return d;}
+    private int dp(int n){return(int)(n*getResources().getDisplayMetrics().density+.5f);}private GradientDrawable bg(int c,int r){GradientDrawable d=new GradientDrawable();d.setColor(c);d.setCornerRadius(dp(r));return d;}
     private LinearLayout column(){LinearLayout l=new LinearLayout(this);l.setOrientation(LinearLayout.VERTICAL);return l;}
-    private TextView text(LinearLayout parent,String value,int size,int color){TextView t=new TextView(this);t.setText(value);t.setTextSize(size);t.setTextColor(color);t.setPadding(0,dp(6),0,dp(8));t.setTextIsSelectable(true);parent.addView(t);return t;}
-    private TextView title(LinearLayout parent,String value,int size){TextView t=text(parent,value,size,ink);t.setTypeface(null,Typeface.BOLD);return t;}
-    private Button button(LinearLayout parent,String label,boolean primary,Runnable action){Button b=new Button(this);b.setText(label);b.setTextSize(15);b.setAllCaps(false);b.setTextColor(primary?Color.WHITE:green);b.setBackground(bg(primary?green:Color.rgb(233,239,223),12));b.setMinHeight(dp(50));b.setPadding(dp(12),dp(10),dp(12),dp(10));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,dp(7),0,dp(7));parent.addView(b,lp);b.setOnClickListener(v->action.run());return b;}
-    private EditText input(LinearLayout parent,String label,String value,boolean multiline){text(parent,label,14,muted);EditText e=new EditText(this);e.setTextSize(16);e.setTextColor(ink);e.setText(value);e.setSingleLine(!multiline);e.setInputType(InputType.TYPE_CLASS_TEXT|(multiline?InputType.TYPE_TEXT_FLAG_MULTI_LINE:InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS));e.setPadding(dp(12),dp(12),dp(12),dp(12));e.setBackground(bg(Color.rgb(242,245,239),10));parent.addView(e,new LinearLayout.LayoutParams(-1,-2));return e;}
-    private LinearLayout card(){LinearLayout l=column();l.setPadding(dp(20),dp(18),dp(20),dp(18));l.setBackground(bg(Color.WHITE,20));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,dp(14),0,dp(8));body.addView(l,lp);return l;}
-    private void message(String value){new AlertDialog.Builder(this).setTitle("工地词卡").setMessage(value).setPositiveButton("知道了",null).show();}
-    private void toast(String value){Toast.makeText(this,value,Toast.LENGTH_LONG).show();}
-    private String today(){return LocalDate.now().toString();}
+    private TextView text(LinearLayout p,String s,int z,int c){TextView t=new TextView(this);t.setText(s);t.setTextSize(z);t.setTextColor(c);t.setPadding(0,dp(5),0,dp(7));t.setTextIsSelectable(true);p.addView(t);return t;}
+    private TextView title(LinearLayout p,String s,int z){TextView t=text(p,s,z,ink);t.setTypeface(null,Typeface.BOLD);return t;}
+    private Button button(LinearLayout p,String s,boolean primary,Runnable action){Button b=new Button(this);b.setText(s);b.setAllCaps(false);b.setTextSize(15);b.setTextColor(primary?Color.WHITE:green);b.setBackground(bg(primary?green:Color.rgb(231,238,231),12));b.setMinHeight(dp(50));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,dp(6),0,dp(6));p.addView(b,lp);b.setOnClickListener(v->action.run());return b;}
+    private EditText input(LinearLayout p,String label,String value,boolean multi){text(p,label,13,muted);EditText e=new EditText(this);e.setText(value);e.setTextSize(16);e.setTextColor(ink);e.setSingleLine(!multi);e.setGravity(multi?Gravity.TOP:Gravity.CENTER_VERTICAL);e.setMinLines(multi?6:1);e.setInputType(InputType.TYPE_CLASS_TEXT|(multi?InputType.TYPE_TEXT_FLAG_MULTI_LINE:InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS));e.setPadding(dp(12),dp(12),dp(12),dp(12));e.setBackground(bg(Color.rgb(239,243,239),10));p.addView(e,new LinearLayout.LayoutParams(-1,-2));return e;}
+    private LinearLayout card(){LinearLayout c=column();c.setPadding(dp(18),dp(16),dp(18),dp(16));c.setBackground(bg(Color.WHITE,18));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,dp(12),0,dp(8));body.addView(c,lp);return c;}
+    private void message(String s){new AlertDialog.Builder(this).setTitle("情境词卡").setMessage(s).setPositiveButton("知道了",null).show();}private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_LONG).show();}private String today(){return LocalDate.now().toString();}
 
-    private void page(String section,String heading,String sub){
-        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-        tab=section;
-        LinearLayout root=column();root.setBackgroundColor(paper);
-        root.setOnApplyWindowInsetsListener((v,insets)->{v.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});
-        LinearLayout top=new LinearLayout(this);top.setGravity(Gravity.CENTER_VERTICAL);top.setPadding(dp(20),dp(6),dp(20),0);
-        TextView logo=new TextView(this);logo.setText("▣ 工地词卡");logo.setTextColor(green);logo.setTypeface(null,Typeface.BOLD);logo.setTextSize(19);top.addView(logo,new LinearLayout.LayoutParams(0,dp(50),1));logo.setGravity(Gravity.CENTER_VERTICAL);
-        Button settings=new Button(this);settings.setText("API 设置");settings.setTextColor(green);settings.setAllCaps(false);top.addView(settings);settings.setOnClickListener(v->settings(active));root.addView(top);
-        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);body=column();body.setPadding(dp(20),dp(12),dp(20),dp(24));scroll.addView(body);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-        title(body,heading,29);text(body,sub,14,muted);
-        LinearLayout nav=new LinearLayout(this);nav.setPadding(dp(10),dp(4),dp(10),dp(4));
-        String[] labels={"＋ 添加","▤ 单词本","✓ 复习"};String[] tabs={"add","words","review"};
-        for(int i=0;i<3;i++){final int which=i;Button b=new Button(this);b.setText(labels[i]);b.setAllCaps(false);b.setTextSize(14);b.setTextColor(section.equals(tabs[i])?Color.WHITE:green);b.setBackground(bg(section.equals(tabs[i])?green:paper,12));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(52),1);lp.setMargins(dp(3),0,dp(3),0);nav.addView(b,lp);b.setOnClickListener(v->{if(which==0)home();else if(which==1)library();else review();});}
-        root.addView(nav);setContentView(root);root.requestApplyInsets();
-    }
+    private void page(String section,String heading,String sub){getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);tab=section;LinearLayout root=column();root.setBackgroundColor(paper);root.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());return i;});
+        LinearLayout top=new LinearLayout(this);top.setGravity(Gravity.CENTER_VERTICAL);top.setPadding(dp(18),dp(5),dp(18),0);TextView logo=new TextView(this);logo.setText("◫ 情境词卡");logo.setTextColor(green);logo.setTypeface(null,Typeface.BOLD);logo.setTextSize(19);logo.setGravity(Gravity.CENTER_VERTICAL);top.addView(logo,new LinearLayout.LayoutParams(0,dp(50),1));Button settings=new Button(this);settings.setText("API 设置");settings.setAllCaps(false);settings.setTextColor(green);settings.setOnClickListener(v->settings(active));top.addView(settings);root.addView(top);
+        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);body=column();body.setPadding(dp(18),dp(10),dp(18),dp(22));scroll.addView(body);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));title(body,heading,28);text(body,sub,14,muted);
+        LinearLayout nav=new LinearLayout(this);nav.setPadding(dp(8),dp(4),dp(8),dp(5));String[] labels={"＋ 导入","▦ 场景","▤ 单词本","✓ 复习"};String[] tabs={"import","scenes","words","review"};for(int i=0;i<4;i++){final int x=i;Button b=new Button(this);b.setText(labels[i]);b.setAllCaps(false);b.setTextSize(13);b.setTextColor(section.equals(tabs[i])?Color.WHITE:green);b.setBackground(bg(section.equals(tabs[i])?green:paper,11));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(51),1);lp.setMargins(dp(2),0,dp(2),0);nav.addView(b,lp);b.setOnClickListener(v->{if(x==0)home();else if(x==1)scenesHome();else if(x==2)library();else review();});}root.addView(nav);setContentView(root);root.requestApplyInsets();}
 
-    private ArrayList<JSONObject> rows(){ArrayList<JSONObject> list=new ArrayList<>();try(Cursor c=db.rawQuery("SELECT word,content,stage,due FROM words ORDER BY word",null)){while(c.moveToNext())list.add(new JSONObject().put("word",c.getString(0)).put("content",new JSONObject(c.getString(1))).put("stage",c.getInt(2)).put("due",c.getString(3)));}catch(Exception e){message("词库读取失败，请保留应用数据。");}return list;}
-    private JSONObject find(String word){for(JSONObject r:rows())if(r.optString("word").equals(word))return r;return null;}
-    private int dueCount(){int n=0;for(JSONObject r:rows())if(r.optString("due").compareTo(today())<=0)n++;return n;}
-    private boolean save(String word,JSONObject content){ContentValues v=new ContentValues();v.put("word",word);v.put("content",content.toString());v.put("stage",0);v.put("due",today());try{db.insertOrThrow("words",null,v);return true;}catch(Exception e){message("未能保存。请检查手机可用空间，或确认单词是否已存在。");return false;}}
+    private ArrayList<JSONObject> rows(){ArrayList<JSONObject> out=new ArrayList<>();try(Cursor c=db.rawQuery("SELECT word,content,stage,due,mastery FROM words ORDER BY word",null)){while(c.moveToNext())out.add(new JSONObject().put("word",c.getString(0)).put("content",new JSONObject(c.getString(1))).put("stage",c.getInt(2)).put("due",c.getString(3)).put("mastery",c.getInt(4)));}catch(Exception e){message("词库读取失败。");}return out;}
+    private JSONObject find(String w){for(JSONObject r:rows())if(w.equals(r.optString("word")))return r;return null;}private int dueCount(){int n=0;for(JSONObject r:rows())if(r.optString("due").compareTo(today())<=0)n++;return n;}
 
-    private void home(){
-        page("add","从一个单词开始。","本机保存 · 离线可复习 · 无需电脑");
-        text(body,rows().size()+" 个单词   /   今天待复习 "+dueCount()+" 个",17,green);
-        LinearLayout c=card();title(c,"今天想学什么？",21);EditText word=input(c,"英文单词或短语","",false);word.setHint("例如 scaffold");
-        text(c,"当前 API："+active+(busy?" · 正在生成…":""),13,muted);
-        button(c,"用当前 API 生成",true,()->{try{generate(Review.normalize(word.getText().toString()));}catch(Exception e){message(e.getMessage());}});
-        button(c,"手动添加，不用联网",false,()->manual(word.getText().toString()));
-        LinearLayout demo=card();title(demo,"先试三个施工词汇",20);text(demo,"预置学习卡片，完全离线。",14,muted);
-        for(String w:new String[]{"scaffold","concrete","helmet"})button(demo,w,false,()->{try{if(find(w)==null&&!save(w,demos.getJSONObject(w)))return;detail(w,false);}catch(Exception e){message("无法读取示例。");}});
-        button(body,"开始今日复习 →",true,()->review());
-    }
+    private void home(){page("import","批量导入单词","无需选择场景，AI 会从整批单词中自动发现情境。");text(body,rows().size()+" 个单词 · 今天待复习 "+dueCount()+" 个",16,green);
+        long draft=store.latestBatch();if(draft>0){LinearLayout resume=card();title(resume,"有未完成的导入",20);text(resume,"上次的解析或分类结果已保存，不会自动重新调用 AI。",14,muted);button(resume,"继续上次导入",true,()->resumeBatch(draft));}
+        LinearLayout c=card();EditText raw=input(c,"每行一个单词，也可写成 word: 释义","",true);raw.setHint("boarding pass: 登机牌\ncheck in\npassport, 护照");button(c,"预览粘贴内容",true,()->parsePreview(raw.getText().toString(),false,"paste"));button(c,"选择 CSV 文件",false,()->{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("text/*");startActivityForResult(i,20);});
+        text(c,"支持空行、重复项、制表符、冒号、等号和 CSV 前两列。导入前不会写入词库。",13,muted);button(body,"单独手动添加",false,()->manual(""));}
 
-    private void library(){
-        page("words","我的单词本","所有内容都在手机里，关闭电脑也能用。");
-        EditText search=input(body,"搜索英文或中文意思","",false);LinearLayout list=column();body.addView(list);
-        Runnable render=()->{list.removeAllViews();String q=search.getText().toString().toLowerCase(java.util.Locale.ROOT).trim();int count=0;
-            for(JSONObject r:rows()){String w=r.optString("word"), meaning=r.optJSONObject("content").optString("meaning");if(!w.contains(q)&&!meaning.contains(q))continue;count++;button(list,w+"  ·  "+meaning+"\n"+(r.optString("due").compareTo(today())<=0?"今天复习":"下次："+r.optString("due")),false,()->detail(w,false));}
-            if(count==0)text(list,q.isEmpty()?"还没有单词，先添加一个吧。":"没有找到匹配的单词。",16,muted);
-        };render.run();search.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int c,int f){}public void onTextChanged(CharSequence s,int a,int b,int c){render.run();}public void afterTextChanged(Editable e){}});
-        button(body,"导出词库备份",false,()->{Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("application/json");i.putExtra(Intent.EXTRA_TITLE,"工地词卡-"+today()+".json");startActivityForResult(i,10);});
-        button(body,"从备份导入",false,()->{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("application/json");startActivityForResult(i,11);});
-    }
+    private void parsePreview(String raw,boolean csv,String source){try{JSONObject p=ImportParser.parse(raw,csv);JSONArray items=p.getJSONArray("items"),kept=new JSONArray(),existing=new JSONArray();for(int i=0;i<items.length();i++){JSONObject item=items.getJSONObject(i);if(find(item.getString("word"))!=null)existing.put(item);else kept.put(item);}p.put("items",kept).put("existing",existing);showImportPreview(p,source);}catch(Exception e){message("解析失败："+e.getMessage());}}
+    private void showImportPreview(JSONObject p,String source)throws Exception{page("import","导入预览","检查有效单词、重复项和格式错误，再交给 AI 整批分析。");JSONArray items=p.getJSONArray("items"),existing=p.getJSONArray("existing"),errors=p.getJSONArray("errors"),dups=p.getJSONArray("duplicates");LinearLayout ok=card();title(ok,"可导入 "+items.length()+" 个",20);for(int i=0;i<items.length();i++){JSONObject x=items.getJSONObject(i);text(ok,x.getString("word")+(x.optString("meaning").isEmpty()?"":" — "+x.optString("meaning")),15,ink);}LinearLayout issues=card();title(issues,"已处理的问题",20);text(issues,"已有词 "+existing.length()+" · 本批重复 "+dups.length()+" · 格式问题 "+errors.length()+" · 空行 "+p.optInt("empty_lines"),14,muted);for(int i=0;i<errors.length();i++){JSONObject e=errors.getJSONObject(i);text(issues,"第 "+e.optInt("line")+" 行："+e.optString("message")+" — "+e.optString("raw"),13,Color.rgb(150,67,46));}if(items.length()>0)button(body,"确认列表并让 AI 分类",true,()->{try{long id=store.createBatch(p,source);classifyBatch(id,false);}catch(Exception e){message("保存导入批次失败："+e.getMessage());}});button(body,"返回修改",false,()->home());}
+    private void resumeBatch(long id){if("parsed".equals(store.batchStatus(id)))classifyBatch(id,false);else classificationPreview(id);}
 
-    private void manual(String initial){
-        page("add","手动添加","只需填英文和意思，就能开始离线复习。");LinearLayout c=card();EditText word=input(c,"英文单词或短语",initial,false);EditText meaning=input(c,"中文意思（必填）","",true);EditText example=input(c,"英文例句（选填）","",true);EditText translation=input(c,"例句翻译（选填）","",true);
-        button(c,"保存到手机",true,()->{try{String w=Review.normalize(word.getText().toString()),m=meaning.getText().toString().trim();if(m.isEmpty()){message("请填写中文意思。");return;}if(find(w)!=null){message("这个词已经存在，可在单词本查看。");return;}JSONObject content=new JSONObject();for(String f:ApiClient.FIELDS)content.put(f,"");content.put("meaning",m).put("example",example.getText().toString().trim()).put("translation",translation.getText().toString().trim()).put("quiz","“"+m+"”用英语怎么说？").put("answer",w);if(save(w,content))detail(w,false);}catch(Exception e){message(e.getMessage());}});
-    }
+    private void classifyBatch(long id,boolean reclassify){if(busy){message("已有 AI 任务正在运行。");return;}JSONObject p=profile(active);String key=vault.get(active);if(p==null||key.isEmpty()){message("请先在 API 设置中填写并验证密钥。导入批次已经保存，设置后可继续。");settings(active);return;}if(reclassify)new AlertDialog.Builder(this).setTitle("重新分类？").setMessage("会调用 AI 并替换本批次现有分类和人工调整。旧单词及复习记录不会删除。").setNegativeButton("取消",null).setPositiveButton("重新分类",(d,w)->runClassification(id,p,key)).show();else runClassification(id,p,key);}
+    private void runClassification(long id,JSONObject p,String key){busy=true;home();toast("AI 正在分析整批单词，请稍候。");worker.execute(()->{try{JSONObject result=ApiClient.generateBatch(store.batchItems(id),store.knownWords(300),p.getString("base"),p.getString("model"),key,p.optBoolean("responses"));store.saveClassification(id,result);runOnUiThread(()->{busy=false;classificationPreview(id);});}catch(Exception e){runOnUiThread(()->{busy=false;if(e.getMessage()!=null&&e.getMessage().startsWith("HTTP 401"))vault.clear(active);home();message(safeError(e));});}});}
+    private String safeError(Exception e){if(e instanceof java.net.SocketTimeoutException)return"连接超时，分类草稿未更新。";if(e instanceof java.io.IOException)return"无法连接 API，请检查网络、地址和证书。";return e.getMessage()==null?"AI 返回内容无法验证，未覆盖现有结果。":e.getMessage();}
 
-    private void detail(String word,boolean reviewing){
-        JSONObject row=find(word);if(row==null){library();return;}
-        page(reviewing?"review":"words",reviewing?"先回忆，再翻开":"单词卡片",reviewing?"今天还有 "+dueCount()+" 个单词":"下次复习："+row.optString("due"));
-        LinearLayout c=card();title(c,word,34);
-        if(reviewing){text(c,"它是什么意思？试着用它说一句英语。",16,muted);button(c,"显示答案",true,()->{showDetails(word,row,true);});}
-        else showDetails(word,row,false);
-    }
+    private void scenesHome(){page("scenes","AI 场景","已确认的分类直接从本地读取，不会自动调用 AI。");try{JSONArray all=new JSONArray();try(Cursor c=db.rawQuery("SELECT id,created_at,status FROM import_batches WHERE status IN ('draft','confirmed') ORDER BY id DESC",null)){while(c.moveToNext())all.put(new JSONObject().put("id",c.getLong(0)).put("created",c.getString(1)).put("status",c.getString(2)));}if(all.length()==0){text(card(),"还没有场景。先批量导入一组单词，让 AI 从整体关系中聚类。",15,muted);return;}for(int i=0;i<all.length();i++){JSONObject b=all.getJSONObject(i);long id=b.getLong("id");button(body,(b.getString("status").equals("draft")?"待确认 · ":"已确认 · ")+b.getString("created").replace('T',' '),false,()->classificationPreview(id));}}catch(Exception e){message("无法读取场景列表。");}}
+    private void classificationPreview(long id){page("scenes","分类预览","可重命名、移动、合并或拆分。人工调整会立即保存。");try{JSONArray scenes=store.batchScenes(id);HashMap<String,Integer> counts=new HashMap<>();for(int i=0;i<scenes.length();i++){JSONArray ms=scenes.getJSONObject(i).getJSONArray("members");for(int j=0;j<ms.length();j++){String w=ms.getJSONObject(j).getString("word");counts.put(w,counts.containsKey(w)?counts.get(w)+1:1);}}
+        for(int i=0;i<scenes.length();i++){JSONObject scene=scenes.getJSONObject(i);long sid=scene.getLong("id");LinearLayout c=card();title(c,scene.getString("name"),21);JSONArray members=scene.getJSONArray("members");for(int j=0;j<members.length();j++){JSONObject m=members.getJSONObject(j);text(c,m.getString("word")+(counts.get(m.getString("word"))>1?" · 多场景":"")+"\n"+m.getString("reason"),14,ink);}button(c,"修改场景",false,()->editScene(id,sid));}
+        JSONArray missing=store.unclassified(id);if(missing.length()>0){LinearLayout c=card();title(c,"无法准确判断",20);for(int i=0;i<missing.length();i++){JSONObject x=missing.getJSONObject(i);text(c,x.getString("word")+" — "+x.optString("reason"),14,ink);}}
+        if("draft".equals(store.batchStatus(id)))button(body,"确认并保存分类",true,()->{store.confirm(id);toast("分类已确认，不会自动重算。");classificationPreview(id);});else text(body,"此分类已确认；人工调整仍会保存。",14,green);button(body,"主动重新分类",false,()->classifyBatch(id,true));
+    }catch(Exception e){message("分类读取失败："+e.getMessage());}}
 
-    private void showDetails(String word,JSONObject row,boolean reviewing){
-        page(reviewing?"review":"words",word,reviewing?"想一想自己刚才的答案，再选择记忆程度。":"已保存在手机，可离线查看。");
-        JSONObject content=row.optJSONObject("content");LinearLayout c=card();title(c,content.optString("meaning"),24);
-        String[] fields={"part_of_speech","explanation","example","translation","memory","quiz"};String[] labels={"词性","简单解释","例句","翻译","记忆提示","小测试"};
-        for(int i=0;i<fields.length;i++){String s=content.optString(fields[i]);if(!s.isEmpty()){text(c,labels[i],13,green);text(c,s,17,ink);}}
-        if(!content.optString("answer").isEmpty())button(c,"查看小测试参考答案",false,()->message(content.optString("answer")));
-        if(reviewing){
-            for(int i=1;i<=3;i++){final int rating=i;String label=i==1?"认识 · 拉长复习间隔":i==2?"有点模糊 · 明天再看":"不认识 · 明天重新开始";button(body,label,i==1,()->rate(word,row,rating));}
-        }else{
-            button(body,"去今天复习",true,()->review());
-            button(body,"删除这个单词",false,()->new AlertDialog.Builder(this).setTitle("删除 "+word+"？").setMessage("词卡和复习进度将一起删除。").setNegativeButton("取消",null).setPositiveButton("删除",(d,w)->{try{db.delete("words","word=?",new String[]{word});library();}catch(Exception e){message("删除失败，请重试。");}}).show());
-        }
-    }
+    private void editScene(long batch,long sid){try{JSONArray scenes=store.batchScenes(batch);JSONObject current=null;for(int i=0;i<scenes.length();i++)if(scenes.getJSONObject(i).getLong("id")==sid)current=scenes.getJSONObject(i);if(current==null)return;final JSONObject chosen=current;String[] actions={"修改名称","移动一个单词","合并到其他场景","拆分出新场景"};new AlertDialog.Builder(this).setTitle(chosen.getString("name")).setItems(actions,(d,which)->{if(which==0)renameScene(batch,sid,chosen.optString("name"));else if(which==1)chooseMove(batch,chosen,scenes);else if(which==2)chooseMerge(batch,chosen,scenes);else splitScene(batch,chosen);}).show();}catch(Exception e){message("无法修改场景。");}}
+    private void renameScene(long batch,long sid,String old){EditText e=new EditText(this);e.setText(old);new AlertDialog.Builder(this).setTitle("新场景名称").setView(e).setNegativeButton("取消",null).setPositiveButton("保存",(d,w)->{String n=e.getText().toString().trim();if(n.isEmpty()||n.length()>40){message("名称需为 1–40 个字符。");return;}store.renameScene(sid,n);classificationPreview(batch);}).show();}
+    private void chooseMove(long batch,JSONObject from,JSONArray scenes){try{JSONArray members=from.getJSONArray("members");String[] words=new String[members.length()];for(int i=0;i<words.length;i++)words[i]=members.getJSONObject(i).getString("word");new AlertDialog.Builder(this).setTitle("选择要移动的单词").setItems(words,(d,wi)->{ArrayList<JSONObject> targets=new ArrayList<>();for(int i=0;i<scenes.length();i++)if(scenes.optJSONObject(i).optLong("id")!=from.optLong("id"))targets.add(scenes.optJSONObject(i));String[] names=new String[targets.size()];for(int i=0;i<names.length;i++)names[i]=targets.get(i).optString("name");new AlertDialog.Builder(this).setTitle("移动到").setItems(names,(d2,si)->{store.moveWord(from.optLong("id"),targets.get(si).optLong("id"),words[wi]);classificationPreview(batch);}).show();}).show();}catch(Exception e){message("移动失败。");}}
+    private void chooseMerge(long batch,JSONObject from,JSONArray scenes){ArrayList<JSONObject> targets=new ArrayList<>();for(int i=0;i<scenes.length();i++)if(scenes.optJSONObject(i).optLong("id")!=from.optLong("id"))targets.add(scenes.optJSONObject(i));String[] names=new String[targets.size()];for(int i=0;i<names.length;i++)names[i]=targets.get(i).optString("name");new AlertDialog.Builder(this).setTitle("合并到哪个场景？").setItems(names,(d,i)->{store.mergeScene(from.optLong("id"),targets.get(i).optLong("id"));classificationPreview(batch);}).show();}
+    private void splitScene(long batch,JSONObject from){LinearLayout box=column();box.setPadding(dp(20),0,dp(20),0);EditText name=input(box,"新场景名称","",false),words=input(box,"要移出的单词，用逗号分隔","",true);new AlertDialog.Builder(this).setTitle("拆分场景").setView(box).setNegativeButton("取消",null).setPositiveButton("拆分",(d,w)->{try{String n=name.getText().toString().trim();if(n.isEmpty())throw new Exception("请输入名称。");store.splitScene(from.optLong("id"),n,words.getText().toString().split("[,，\\s]+"));classificationPreview(batch);}catch(Exception e){message("拆分失败："+e.getMessage());}}).show();}
 
-    private void review(){for(JSONObject row:rows())if(row.optString("due").compareTo(today())<=0){detail(row.optString("word"),true);return;}page("review",rows().isEmpty()?"先收藏一个单词吧":"今天复习完成了","不用一次记住所有，明天再见一面。");button(body,"继续学新词",true,()->home());}
-    private void rate(String word,JSONObject row,int rating){try{String[] next=Review.next(row.getInt("stage"),rating,LocalDate.now());ContentValues v=new ContentValues();v.put("stage",Integer.parseInt(next[0]));v.put("due",next[1]);int count=db.update("words",v,"word=? AND due=? AND stage=?",new String[]{word,row.getString("due"),row.getString("stage")});toast(count==1?"已保存，下次复习："+next[1]:"进度已更新，请继续复习。");review();}catch(Exception e){message("评分未保存，请重试。");}}
+    private void library(){page("words","我的单词本","旧数据和复习进度已保留；可标记熟悉程度供 AI 优先关联。");EditText search=input(body,"搜索单词、释义或场景","",false);LinearLayout list=column();body.addView(list);Runnable render=()->{list.removeAllViews();String q=search.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);int count=0;for(JSONObject r:rows()){String w=r.optString("word"),m=r.optJSONObject("content").optString("meaning"),ss="";try{JSONArray s=store.scenesFor(w);for(int i=0;i<s.length();i++)ss+=s.getJSONObject(i).optString("name")+" ";}catch(Exception ignored){}if(!w.contains(q)&&!m.contains(q)&&!ss.toLowerCase(java.util.Locale.ROOT).contains(q))continue;count++;button(list,w+" · "+m+"\n"+(r.optInt("mastery")==2?"已掌握":r.optInt("mastery")==1?"熟悉":"学习中")+(ss.isEmpty()?"":" · "+ss.trim()),false,()->detail(w,false));}if(count==0)text(list,q.isEmpty()?"还没有单词。":"没有匹配结果。",15,muted);};render.run();search.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int b,int c){}public void onTextChanged(CharSequence s,int a,int b,int c){render.run();}public void afterTextChanged(Editable e){}});button(body,"导出词库备份",false,()->{Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("application/json");i.putExtra(Intent.EXTRA_TITLE,"情境词卡-"+today()+".json");startActivityForResult(i,10);});button(body,"导入旧版词库备份",false,()->{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("application/json");startActivityForResult(i,11);});}
+    private void manual(String initial){page("import","手动添加","手动录入不会自动创建场景，可稍后与一批新词一起分析。");LinearLayout c=card();EditText word=input(c,"英文单词或短语",initial,false),meaning=input(c,"中文意思","",true),example=input(c,"例句（选填）","",true);button(c,"保存",true,()->{try{String w=Review.normalize(word.getText().toString()),m=meaning.getText().toString().trim();if(m.isEmpty())throw new Exception("请填写中文意思。");if(find(w)!=null)throw new Exception("这个词已经存在。");JSONObject content=emptyCard(w,m);content.put("example",example.getText().toString().trim());ContentValues v=new ContentValues();v.put("word",w);v.put("content",content.toString());v.put("stage",0);v.put("due",today());db.insertOrThrow("words",null,v);detail(w,false);}catch(Exception e){message(e.getMessage());}});}
+    private JSONObject emptyCard(String word,String meaning)throws Exception{JSONObject c=new JSONObject().put("word",word);for(String f:ApiClient.FIELDS)c.put(f,"");return c.put("meaning",meaning).put("quiz","“"+meaning+"”用英语怎么说？").put("answer",word);}
 
-    private JSONObject profile(String name){for(int i=0;i<profiles.length();i++){JSONObject p=profiles.optJSONObject(i);if(p!=null&&name.equals(p.optString("name")))return p;}return null;}
-    private void persistProfiles(){prefs.edit().putString("profiles",profiles.toString()).putString("active",active).apply();}
-    private void settings(String selected){
-        page("add","自由切换 API","支持 OpenAI 兼容接口；离线功能不需要配置。");
-        getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
-        LinearLayout pick=card();title(pick,"已保存的配置",20);
-        for(int i=0;i<profiles.length();i++){String n=profiles.optJSONObject(i).optString("name");button(pick,(n.equals(active)?"✓ ":"")+n,false,()->settings(n));}
-        button(pick,"＋ 新建配置",false,()->settings(""));
-        JSONObject p=profile(selected);LinearLayout c=card();
-        EditText name=input(c,"配置名称",p==null?"":selected,false);
-        EditText base=input(c,"Base URL 或完整接口地址",p==null?"https://":p.optString("base"),false);
-        EditText model=input(c,"模型名称",p==null?"":p.optString("model"),false);
-        text(c,"接口格式",14,muted);Spinner protocol=new Spinner(this);protocol.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{"Chat Completions（兼容接口常用）","Responses"}));protocol.setSelection(p!=null&&p.optBoolean("responses")?1:0);c.addView(protocol);
-        EditText key=input(c,"API Key（仅本次运行，重开需重新输入）",sessionKeys.containsKey(selected)?sessionKeys.get(selected):"",false);key.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);key.setSaveEnabled(false);key.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
-        text(c,"密钥和待学单词会发送给你选定的服务商。地址与模型会保存，密钥不会保存到磁盘。",13,muted);
-        button(c,"保存并切换到此配置",true,()->{try{
-            String n=name.getText().toString().trim(),b=base.getText().toString().trim(),m=model.getText().toString().trim();boolean responses=protocol.getSelectedItemPosition()==1;
-            if(n.isEmpty()||n.length()>40||m.isEmpty()||m.length()>200){message("请填写配置名称（最多 40 字）和模型名称。");return;}
-            if(!n.equals(selected)&&profile(n)!=null){message("配置名称已存在，请换一个名称。");return;}
-            String endpoint=ApiClient.endpoint(b,responses);String k=key.getText().toString().trim();if(k.contains("\n")||k.contains("\r")){message("密钥不能包含换行。");return;}
-            JSONObject updated=new JSONObject().put("name",n).put("base",b).put("model",m).put("responses",responses);
-            JSONArray next=new JSONArray();for(int i=0;i<profiles.length();i++)if(!selected.equals(profiles.getJSONObject(i).optString("name")))next.put(profiles.getJSONObject(i));next.put(updated);
-            profiles=next;active=n;sessionKeys.remove(selected);sessionKeys.put(n,k);persistProfiles();toast("已切换到 "+n);home();
-        }catch(Exception e){message(e.getMessage());}});
-        if(p!=null&&profiles.length()>1)button(c,"删除此配置",false,()->new AlertDialog.Builder(this).setTitle("删除配置？").setMessage("不会删除单词本。").setNegativeButton("取消",null).setPositiveButton("删除",(d,w)->{JSONArray next=new JSONArray();for(int i=0;i<profiles.length();i++)if(!selected.equals(profiles.optJSONObject(i).optString("name")))next.put(profiles.optJSONObject(i));profiles=next;sessionKeys.remove(selected);if(active.equals(selected))active=profiles.optJSONObject(0).optString("name");persistProfiles();settings(active);}).show());
-        text(body,"例如 Base URL 填 https://api.openai.com/v1，程序按所选格式补上 /chat/completions 或 /responses。也可以直接填完整地址。仅支持 HTTPS + Bearer Key 的兼容接口，不支持服务商专有认证。",13,muted);
-    }
+    private void detail(String word,boolean reviewing){JSONObject row=find(word);if(row==null){library();return;}if(reviewing){page("review","先回忆，再翻开","今天还有 "+dueCount()+" 个单词");LinearLayout c=card();title(c,word,34);text(c,"它是什么意思？它属于什么情境？能否想到一个关联旧词？",16,muted);button(c,"显示答案",true,()->showDetails(word,row,true));}else showDetails(word,row,false);}
+    private void showDetails(String word,JSONObject row,boolean reviewing){page(reviewing?"review":"words",word,reviewing?"核对答案和联想，再评价记忆程度。":"词卡、场景和联想都从本地读取。");JSONObject content=row.optJSONObject("content");LinearLayout c=card();title(c,content.optString("meaning"),23);String[] fs={"part_of_speech","explanation","example","translation","memory","quiz"},ls={"词性","简单解释","例句","翻译","记忆提示","小测试"};for(int i=0;i<fs.length;i++)if(!content.optString(fs[i]).isEmpty()){text(c,ls[i],13,green);text(c,content.optString(fs[i]),16,ink);}if(!content.optString("answer").isEmpty())button(c,"查看测试答案",false,()->message(content.optString("answer")));
+        try{JSONArray scenes=store.scenesFor(word);if(scenes.length()>0){LinearLayout s=card();title(s,"所属场景",20);for(int i=0;i<scenes.length();i++){JSONObject x=scenes.getJSONObject(i);text(s,x.getString("name")+"\n"+x.optString("reason"),14,ink);}}JSONArray links=store.linksFor(word);if(links.length()>0){LinearLayout l=card();title(l,"连接已学单词",20);for(int i=0;i<links.length();i++){JSONObject x=links.getJSONObject(i);text(l,x.getString("old_word")+" · "+x.optString("relation")+"\n"+x.getString("reason")+"\n"+x.optString("example"),14,ink);}}}catch(Exception e){text(body,"场景或关联读取失败。",13,Color.RED);}
+        if(reviewing){for(int i=1;i<=3;i++){final int rating=i;button(body,i==1?"认识":i==2?"有点模糊":"不认识",i==1,()->rate(word,row,rating));}}else{button(body,row.optInt("mastery")==2?"✓ 已掌握":"标记为已掌握",true,()->setMastery(word,2));button(body,"标记为熟悉",false,()->setMastery(word,1));button(body,"删除单词",false,()->new AlertDialog.Builder(this).setTitle("删除 "+word+"？").setMessage("会删除词卡、场景成员和关联，批次记录仍保留。").setNegativeButton("取消",null).setPositiveButton("删除",(d,w)->{db.beginTransaction();try{db.delete("scene_words","word=?",new String[]{word});db.delete("word_links","new_word=? OR old_word=?",new String[]{word,word});db.delete("words","word=?",new String[]{word});db.setTransactionSuccessful();}finally{db.endTransaction();}library();}).show());}}
+    private void setMastery(String word,int value){ContentValues v=new ContentValues();v.put("mastery",value);db.update("words",v,"word=?",new String[]{word});toast(value==2?"已标记为掌握，AI 会优先用它建立联想。":"已标记为熟悉。");detail(word,false);}
+    private void review(){for(JSONObject r:rows())if(r.optString("due").compareTo(today())<=0){detail(r.optString("word"),true);return;}page("review",rows().isEmpty()?"先导入一些单词吧":"今天复习完成了","已保存的词卡、场景和联想均可离线查看。");button(body,"导入新单词",true,()->home());}
+    private void rate(String word,JSONObject row,int rating){try{String[] n=Review.next(row.getInt("stage"),rating,LocalDate.now());ContentValues v=new ContentValues();v.put("stage",Integer.parseInt(n[0]));v.put("due",n[1]);if(rating==1&&row.optInt("mastery")<1)v.put("mastery",1);db.update("words",v,"word=? AND due=? AND stage=?",new String[]{word,row.getString("due"),row.getString("stage")});toast("下次复习："+n[1]);review();}catch(Exception e){message("评分未保存。");}}
 
-    private void generate(String word){
-        if(busy){message("已有一个词正在生成，请稍候。");return;}
-        if(find(word)!=null){detail(word,false);return;}
-        JSONObject p=profile(active);if(p==null){settings(active);return;}
-        final String base=p.optString("base"),model=p.optString("model"),name=active,key=sessionKeys.containsKey(active)?sessionKeys.get(active):"";final boolean responses=p.optBoolean("responses");
-        if(key.isEmpty()){message("请先在 API 设置中填写此配置的密钥。无需密钥的自建接口暂不支持。");settings(active);return;}
-        new AlertDialog.Builder(this).setTitle("生成 "+word+"？").setMessage("使用「"+name+"」的 "+model+" 模型。此操作会联网，服务商可能计费。").setNegativeButton("取消",null).setPositiveButton("生成",(d,w)->{
-            if(busy)return;busy=true;home();toast("正在生成，可继续浏览已保存的词。");
-            worker.execute(()->{try{JSONObject content=ApiClient.generate(word,base,model,key,responses);runOnUiThread(()->{busy=false;if(isFinishing()||isDestroyed())return;if(find(word)!=null){toast("这个词已存在，保留原内容。");return;}if(save(word,content)){toast(word+" 已保存");detail(word,false);}});}catch(Exception e){String err=e instanceof java.net.SocketTimeoutException?"连接超时，未保存，请检查网络后重试。":e instanceof java.io.IOException?"无法连接服务商，请检查地址、网络和证书。":e instanceof org.json.JSONException?"服务商返回格式不兼容或内容不是完整 JSON，未保存。":e.getMessage();runOnUiThread(()->{busy=false;if(!isFinishing()&&!isDestroyed()){home();message(err==null?"生成失败，未保存。":err);}});}});
-        }).show();
-    }
+    private JSONObject profile(String n){for(int i=0;i<profiles.length();i++){JSONObject p=profiles.optJSONObject(i);if(p!=null&&n.equals(p.optString("name")))return p;}return null;}private void persistProfiles(){prefs.edit().putString("profiles",profiles.toString()).putString("active",active).apply();}
+    private void settings(String selected){page("import","API 设置","密钥验证成功后加密保存，重开应用自动读取。");getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,WindowManager.LayoutParams.FLAG_SECURE);LinearLayout list=card();title(list,"配置",20);for(int i=0;i<profiles.length();i++){String n=profiles.optJSONObject(i).optString("name");button(list,(n.equals(active)?"✓ ":"")+n+(vault.has(n)?" · 密钥已保存":" · 未设置密钥"),false,()->settings(n));}button(list,"＋ 新建配置",false,()->settings(""));JSONObject p=profile(selected);LinearLayout c=card();EditText name=input(c,"配置名称",p==null?"":selected,false),base=input(c,"Base URL 或完整接口地址",p==null?"https://":p.optString("base"),false),model=input(c,"模型名称",p==null?"":p.optString("model"),false),key=input(c,"新 API Key（留空表示保留已保存密钥）","",false);key.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);key.setSaveEnabled(false);key.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);Spinner protocol=new Spinner(this);protocol.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{"Chat Completions","Responses"}));protocol.setSelection(p!=null&&p.optBoolean("responses")?1:0);c.addView(protocol);
+        button(c,"验证、保存并切换",true,()->saveProfile(selected,name.getText().toString().trim(),base.getText().toString().trim(),model.getText().toString().trim(),key.getText().toString().trim(),protocol.getSelectedItemPosition()==1));if(p!=null&&vault.has(selected))button(c,"清除已保存密钥",false,()->new AlertDialog.Builder(this).setTitle("清除密钥？").setMessage("之后调用 AI 时需要重新输入，词库不受影响。").setNegativeButton("取消",null).setPositiveButton("清除",(d,w)->{vault.clear(selected);settings(selected);}).show());if(p!=null&&profiles.length()>1)button(c,"删除此配置",false,()->deleteProfile(selected));text(body,"页面不会显示完整密钥，日志和错误也不会包含密钥。HTTPS、Bearer Key 和 OpenAI 兼容返回是当前支持范围。",13,muted);}
+    private void deleteProfile(String selected){new AlertDialog.Builder(this).setTitle("删除配置？").setMessage("不会删除词库、场景或关联。").setNegativeButton("取消",null).setPositiveButton("删除",(d,w)->{JSONArray next=new JSONArray();for(int i=0;i<profiles.length();i++)if(!selected.equals(profiles.optJSONObject(i).optString("name")))next.put(profiles.optJSONObject(i));profiles=next;vault.clear(selected);if(active.equals(selected))active=profiles.optJSONObject(0).optString("name");persistProfiles();settings(active);}).show();}
+    private void saveProfile(String old,String name,String base,String model,String entered,boolean responses){try{if(name.isEmpty()||name.length()>40||model.isEmpty())throw new Exception("请填写配置名称和模型。");if(!name.equals(old)&&profile(name)!=null)throw new Exception("配置名称已存在。");ApiClient.endpoint(base,responses);String key=entered.isEmpty()?vault.get(old):entered;if(key.isEmpty())throw new Exception("首次保存必须填写 API Key。");busy=true;toast("正在验证密钥…");worker.execute(()->{try{ApiClient.verify(base,model,key,responses);vault.put(name,key);if(!old.isEmpty()&&!old.equals(name))vault.clear(old);JSONObject updated=new JSONObject().put("name",name).put("base",base).put("model",model).put("responses",responses);JSONArray next=new JSONArray();for(int i=0;i<profiles.length();i++)if(!old.equals(profiles.optJSONObject(i).optString("name")))next.put(profiles.optJSONObject(i));next.put(updated);profiles=next;active=name;persistProfiles();runOnUiThread(()->{busy=false;toast("验证成功，密钥已安全保存。");long pending=store.latestBatch();if(pending>0)resumeBatch(pending);else home();});}catch(Exception e){runOnUiThread(()->{busy=false;settings(old);message("验证失败："+safeError(e));});}});}catch(Exception e){message(e.getMessage());}}
 
     private static String read(InputStream in,int limit)throws Exception{ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] b=new byte[8192];int n;while((n=in.read(b))!=-1){out.write(b,0,n);if(out.size()>limit)throw new Exception("文件过大。");}return new String(out.toByteArray(),StandardCharsets.UTF_8);}
-    @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(result!=RESULT_OK||data==null||data.getData()==null)return;
-        try{
-            if(request==10){JSONArray list=new JSONArray();for(JSONObject r:rows())list.put(r);try(OutputStream out=getContentResolver().openOutputStream(data.getData(),"wt")){if(out==null)throw new Exception();out.write(list.toString(2).getBytes(StandardCharsets.UTF_8));}toast("词库已导出，不含 API 密钥或设置。");}
-            if(request==11){JSONArray list;try(InputStream in=getContentResolver().openInputStream(data.getData())){if(in==null)throw new Exception();list=new JSONArray(read(in,5*1024*1024));}if(list.length()>10000)throw new Exception("最多导入一万个单词。");
-                ArrayList<ContentValues> values=new ArrayList<>();for(int i=0;i<list.length();i++){JSONObject row=list.getJSONObject(i);String w=Review.normalize(row.getString("word"));JSONObject c=row.getJSONObject("content");if(c.optString("meaning").trim().isEmpty())throw new Exception("备份中存在缺少意思的单词。");for(String f:ApiClient.FIELDS)if(c.has(f)&&!(c.get(f) instanceof String))throw new Exception("卡片字段类型错误。");int stage=row.getInt("stage");if(stage<0||stage>4)throw new Exception("复习阶段无效。");String due=LocalDate.parse(row.getString("due")).toString();ContentValues v=new ContentValues();v.put("word",w);v.put("content",c.toString());v.put("stage",stage);v.put("due",due);values.add(v);}
-                new AlertDialog.Builder(this).setTitle("导入 "+values.size()+" 个单词？").setMessage("已有同名单词会保留，不覆盖现有复习进度。").setNegativeButton("取消",null).setPositiveButton("导入",(d,w)->{int count=0;db.beginTransaction();try{for(ContentValues v:values)if(db.insertWithOnConflict("words",null,v,SQLiteDatabase.CONFLICT_IGNORE)!=-1)count++;db.setTransactionSuccessful();toast("导入 "+count+" 个新词。");}catch(Exception e){message("导入失败，未保存本次导入内容。");}finally{db.endTransaction();}library();}).show();
-            }
-        }catch(Exception e){message("操作失败：文件不可读、格式不正确或没有足够空间。原词库未被覆盖。");}
-    }
-    @Override public void onBackPressed(){if(!"add".equals(tab))home();else super.onBackPressed();}
-    @Override protected void onDestroy(){worker.shutdownNow();sessionKeys.clear();if(db!=null)db.close();super.onDestroy();}
+    @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(result!=RESULT_OK||data==null||data.getData()==null)return;try{
+        if(request==20){String raw;try(InputStream in=getContentResolver().openInputStream(data.getData())){raw=read(in,5*1024*1024);}parsePreview(raw,true,"csv");return;}
+        if(request==10){JSONArray list=new JSONArray();for(JSONObject r:rows())list.put(r);try(OutputStream out=getContentResolver().openOutputStream(data.getData(),"wt")){out.write(list.toString(2).getBytes(StandardCharsets.UTF_8));}toast("已导出词库，不含 API 密钥。");}
+        if(request==11){JSONArray list;try(InputStream in=getContentResolver().openInputStream(data.getData())){list=new JSONArray(read(in,5*1024*1024));}ArrayList<ContentValues> values=new ArrayList<>();for(int i=0;i<list.length();i++){JSONObject r=list.getJSONObject(i);String w=Review.normalize(r.getString("word"));JSONObject c=r.getJSONObject("content");ContentValues v=new ContentValues();v.put("word",w);v.put("content",c.toString());v.put("stage",r.optInt("stage"));v.put("due",r.optString("due",today()));values.add(v);}new AlertDialog.Builder(this).setTitle("导入 "+values.size()+" 个旧版词？").setMessage("同名单词保留当前记录。").setNegativeButton("取消",null).setPositiveButton("导入",(d,w)->{db.beginTransaction();try{for(ContentValues v:values)db.insertWithOnConflict("words",null,v,SQLiteDatabase.CONFLICT_IGNORE);db.setTransactionSuccessful();}finally{db.endTransaction();}library();}).show();}
+    }catch(Exception e){message("文件无法读取或格式不正确，原数据未被覆盖。");}}
+    @Override public void onBackPressed(){if(!"import".equals(tab))home();else super.onBackPressed();}@Override protected void onDestroy(){worker.shutdownNow();if(db!=null)db.close();super.onDestroy();}
 }
