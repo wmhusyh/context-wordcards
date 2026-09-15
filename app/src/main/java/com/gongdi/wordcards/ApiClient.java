@@ -136,12 +136,15 @@ public final class ApiClient {
 
     public static void verify(String base, String model, String key, boolean responses) throws Exception {
         JSONObject p=new JSONObject().put("model",model).put("store",false);
-        if(responses)p.put("input","Reply with OK only.").put("max_output_tokens",16);
+        if(responses)p.put("input","Reply with OK only.").put("max_output_tokens",64);
         else p.put("messages",new JSONArray().put(new JSONObject().put("role","user").put("content","Reply with OK only."))).put("stream",false).put("max_tokens",16);
         String raw=request(endpoint(base,responses),p,key);
-        JSONObject json=new JSONObject(raw);
-        if(responses && !"completed".equals(json.optString("status")))throw new Exception("验证请求没有完成。");
-        if(!responses && json.optJSONArray("choices")==null)throw new Exception("验证响应缺少 choices。");
+        validateVerificationResponse(new JSONObject(raw),responses);
+    }
+
+    public static void validateVerificationResponse(JSONObject json,boolean responses)throws Exception{
+        if(responses){String status=json.optString("status");if(!"completed".equals(status)&&!"incomplete".equals(status))throw new Exception("验证请求失败，请检查模型和接口格式。");}
+        else if(json.optJSONArray("choices")==null)throw new Exception("验证响应缺少 choices。");
     }
 
     private static String request(String target, JSONObject payload, String key) throws Exception {

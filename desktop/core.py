@@ -118,10 +118,13 @@ def request_json(base,model,protocol,key,new_words,known):
     result=json.loads(text);validate_result(result,new_words,known);return result
 
 def verify_key(base,model,protocol,key):
-    if protocol=="responses": payload={"model":model,"store":False,"input":"Reply OK only","max_output_tokens":16}
+    if protocol=="responses": payload={"model":model,"store":False,"input":"Reply OK only","max_output_tokens":64}
     else: payload={"model":model,"store":False,"messages":[{"role":"user","content":"Reply OK only"}],"max_tokens":16}
     envelope=json.loads(_post(endpoint(base,protocol),payload,key))
-    if protocol=="responses" and envelope.get("status")!="completed": raise ValueError("验证请求未完成")
+    validate_verification_envelope(envelope,protocol)
+
+def validate_verification_envelope(envelope,protocol):
+    if protocol=="responses" and envelope.get("status") not in ("completed","incomplete"): raise ValueError("验证请求失败，请检查模型和接口格式")
     if protocol!="responses" and not envelope.get("choices"): raise ValueError("验证响应不兼容")
 
 def _post(url,payload,key):

@@ -73,4 +73,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.schedule(0,1,date(2026,12,31)),(1,"2027-01-01"))
         secret="test-key-for-local-roundtrip";self.assertEqual(core.unprotect(core.protect(secret)),secret)
 
+    def test_responses_verification_accepts_token_limited_result(self):
+        core.validate_verification_envelope({"status":"incomplete"},"responses")
+        with self.assertRaises(ValueError):core.validate_verification_envelope({"status":"failed"},"responses")
+
 if __name__=="__main__":unittest.main(verbosity=2)

@@ -19,6 +19,8 @@ public class AndroidCoreTest {
         JSONArray words=new JSONArray().put(new JSONObject().put("word","passport").put("meaning","护照"));JSONArray known=new JSONArray().put(new JSONObject().put("word","travel").put("meaning","旅行").put("mastery",2).put("scenes",new JSONArray()));
         JSONObject rp=ApiClient.classificationPayload(words,known,"model",true);eq(rp.getJSONObject("text").getJSONObject("format").getString("type"),"json_schema");eq(rp.getBoolean("store"),false);
         JSONObject cp=ApiClient.classificationPayload(words,known,"model",false);eq(cp.getJSONObject("response_format").getString("type"),"json_schema");
+        ApiClient.validateVerificationResponse(new JSONObject().put("status","incomplete"),true);checks++;
+        failed=false;try{ApiClient.validateVerificationResponse(new JSONObject().put("status","failed"),true);}catch(Exception e){failed=true;}eq(failed,true);
         System.out.println("PASS: "+checks+" Android core checks");
     }
 }
