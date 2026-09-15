@@ -148,7 +148,7 @@ public final class ApiClient {
         HttpsURLConnection conn = (HttpsURLConnection) new URL(target).openConnection();
         conn.setInstanceFollowRedirects(false);
         conn.setConnectTimeout(15000);
-        conn.setReadTimeout(60000);
+        conn.setReadTimeout(120000);
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         if (!key.trim().isEmpty()) conn.setRequestProperty("Authorization", "Bearer " + key.trim());
