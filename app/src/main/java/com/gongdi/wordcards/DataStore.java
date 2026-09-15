@@ -26,10 +26,12 @@ public final class DataStore {
             db.execSQL("CREATE TABLE IF NOT EXISTS unclassified(batch_id INTEGER NOT NULL,word TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',PRIMARY KEY(batch_id,word))");
             db.execSQL("CREATE TABLE IF NOT EXISTS word_links(id INTEGER PRIMARY KEY AUTOINCREMENT,batch_id INTEGER NOT NULL,new_word TEXT NOT NULL,old_word TEXT NOT NULL,relation TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL,example TEXT NOT NULL DEFAULT '',UNIQUE(batch_id,new_word,old_word))");
             db.execSQL("CREATE TABLE IF NOT EXISTS classification_chunks(batch_id INTEGER NOT NULL,chunk_index INTEGER NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(batch_id,chunk_index))");
+            db.execSQL("CREATE TABLE IF NOT EXISTS api_debug_responses(id INTEGER PRIMARY KEY AUTOINCREMENT,batch_id INTEGER NOT NULL,chunk_index INTEGER NOT NULL,status TEXT NOT NULL,received_at TEXT NOT NULL,content TEXT NOT NULL)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_batches_status ON import_batches(status,id)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_scene_words_word ON scene_words(word)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_links_new_word ON word_links(new_word)");
-            db.setVersion(3); db.setTransactionSuccessful();
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_api_debug_batch ON api_debug_responses(batch_id,id)");
+            db.setVersion(4); db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
     }
     private void addColumn(String table, String column, String definition) {
@@ -52,13 +54,17 @@ public final class DataStore {
         JSONArray items=new JSONArray();try(Cursor c=db.rawQuery("SELECT word,meaning FROM import_items WHERE batch_id=? AND state='valid' ORDER BY id",new String[]{Long.toString(batchId)})){while(c.moveToNext())items.put(new JSONObject().put("word",c.getString(0)).put("meaning",c.getString(1)));}return items;
     }
     public JSONArray knownWords(int limit) throws Exception {
-        JSONArray items=new JSONArray();try(Cursor c=db.rawQuery("SELECT word,content,mastery FROM words ORDER BY mastery DESC,stage DESC,word LIMIT ?",new String[]{Integer.toString(limit)})){while(c.moveToNext()){JSONObject content=new JSONObject(c.getString(1));items.put(new JSONObject().put("word",c.getString(0)).put("meaning",content.optString("meaning")).put("mastery",c.getInt(2)).put("scenes",scenesFor(c.getString(0))));}}return items;
+        return knownWordsExcluding(new JSONArray(),limit);
     }
+    public JSONArray knownWordsExcluding(JSONArray excluded,int limit)throws Exception{java.util.HashSet<String> skip=new java.util.HashSet<>();for(int i=0;i<excluded.length();i++)skip.add(excluded.getJSONObject(i).getString("word"));JSONArray items=new JSONArray();try(Cursor c=db.rawQuery("SELECT word,content,mastery FROM words ORDER BY mastery DESC,stage DESC,word",null)){while(c.moveToNext()&&items.length()<limit){String word=c.getString(0);if(skip.contains(word))continue;JSONObject content=new JSONObject(c.getString(1));items.put(new JSONObject().put("word",word).put("meaning",content.optString("meaning")).put("mastery",c.getInt(2)).put("scenes",scenesFor(word)));}}return items;}
     public JSONArray scenesFor(String word) throws Exception { JSONArray out=new JSONArray();try(Cursor c=db.rawQuery("SELECT s.name,sw.reason FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id JOIN import_batches b ON b.id=s.batch_id WHERE sw.word=? AND b.status='confirmed' ORDER BY s.id",new String[]{word})){while(c.moveToNext())out.put(new JSONObject().put("name",c.getString(0)).put("reason",c.getString(1)));}return out; }
     public JSONArray existingSceneNames(int limit)throws Exception{JSONArray out=new JSONArray();try(Cursor c=db.rawQuery("SELECT DISTINCT s.name FROM scenes s JOIN import_batches b ON b.id=s.batch_id WHERE b.status='confirmed' ORDER BY s.name LIMIT ?",new String[]{Integer.toString(limit)})){while(c.moveToNext())out.put(c.getString(0));}return out;}
     public void saveChunk(long batchId,int index,JSONObject result){ContentValues v=new ContentValues();v.put("batch_id",batchId);v.put("chunk_index",index);v.put("result",result.toString());v.put("created_at",LocalDateTime.now().toString());db.insertWithOnConflict("classification_chunks",null,v,SQLiteDatabase.CONFLICT_REPLACE);}
     public JSONObject loadChunk(long batchId,int index)throws Exception{try(Cursor c=db.rawQuery("SELECT result FROM classification_chunks WHERE batch_id=? AND chunk_index=?",new String[]{Long.toString(batchId),Integer.toString(index)})){return c.moveToFirst()?new JSONObject(c.getString(0)):null;}}
     public void clearChunks(long batchId){db.delete("classification_chunks","batch_id=?",new String[]{Long.toString(batchId)});}
+    public void saveDebugResponse(long batchId,int chunk,String status,String content){ContentValues v=new ContentValues();v.put("batch_id",batchId);v.put("chunk_index",chunk);v.put("status",status);v.put("received_at",LocalDateTime.now().toString());v.put("content",content);db.insertOrThrow("api_debug_responses",null,v);}
+    public JSONArray debugResponses(long batchId)throws Exception{JSONArray out=new JSONArray();try(Cursor c=db.rawQuery("SELECT chunk_index,status,received_at,content FROM api_debug_responses WHERE batch_id=? ORDER BY id DESC",new String[]{Long.toString(batchId)})){while(c.moveToNext())out.put(new JSONObject().put("chunk",c.getInt(0)).put("status",c.getString(1)).put("received_at",c.getString(2)).put("content",c.getString(3)));}return out;}
+    public int sanitizeLinks(JSONObject result,JSONArray chunk,JSONArray wholeBatch)throws Exception{java.util.HashSet<String> newWords=new java.util.HashSet<>(),excluded=new java.util.HashSet<>();for(int i=0;i<chunk.length();i++)newWords.add(chunk.getJSONObject(i).getString("word"));for(int i=0;i<wholeBatch.length();i++)excluded.add(wholeBatch.getJSONObject(i).getString("word"));JSONArray source=result.getJSONArray("links"),valid=new JSONArray();int dropped=0;for(int i=0;i<source.length();i++){JSONObject link=source.getJSONObject(i);String n=link.optString("new_word"),old=link.optString("old_word");if(newWords.contains(n)&&!excluded.contains(old)&&wordExists(old)&&!link.optString("reason").trim().isEmpty())valid.put(link);else dropped++;}result.put("links",valid);return dropped;}
 
     public void saveClassification(long batchId, JSONObject result) throws Exception {
         validate(result, batchItems(batchId));

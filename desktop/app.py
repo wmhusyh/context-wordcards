@@ -48,7 +48,7 @@ class App(tk.Tk):
     def _build_import(self):
         top=ttk.Frame(self.import_tab,padding=16);top.pack(fill="both",expand=True);self.label(top,"批量导入单词","Title.TLabel").pack(anchor="w");self.label(top,"无需选择场景。粘贴或选择 CSV 后先预览，再由 AI 根据整批关系自动聚类。","Sub.TLabel").pack(anchor="w",pady=(2,12))
         self.raw=tk.Text(top,height=13,font=("Consolas",11),wrap="word");self.raw.pack(fill="both",expand=True);self.raw.insert("1.0","boarding pass: 登机牌\ncheck in\npassport")
-        actions=ttk.Frame(top);actions.pack(fill="x",pady=10);ttk.Button(actions,text="预览粘贴内容",command=self.preview_paste).pack(side="left");ttk.Button(actions,text="选择 CSV",command=self.choose_csv).pack(side="left",padx=8);ttk.Button(actions,text="继续未完成批次",command=self.resume_latest).pack(side="left")
+        actions=ttk.Frame(top);actions.pack(fill="x",pady=10);ttk.Button(actions,text="预览粘贴内容",command=self.preview_paste).pack(side="left");ttk.Button(actions,text="选择 CSV",command=self.choose_csv).pack(side="left",padx=8);ttk.Button(actions,text="继续未完成批次",command=self.resume_latest).pack(side="left");ttk.Button(actions,text="查看 AI 调试返回",command=self.show_debug_responses).pack(side="left",padx=8)
         self.import_summary=tk.StringVar(value="等待导入");self.label(top,"支持每行一个单词、word: 释义，以及 CSV 的前两列。", "Sub.TLabel").pack(anchor="w");summary=self.label(top,"");summary.configure(textvariable=self.import_summary);summary.pack(anchor="w")
 
     def preview_paste(self):self.show_preview(core.parse_import(self.raw.get("1.0","end")),"paste")
@@ -77,20 +77,40 @@ class App(tk.Tk):
         if not p or not key:self.tabs.select(self.api_tab);return messagebox.showinfo("需要 API 密钥","请先填写并验证 API 密钥。导入批次已经保存。")
         if replace and not messagebox.askyesno("重新分类","这会替换本批的分类和人工调整，是否继续？"):return
         if replace:core.clear_chunks(self.db,batch)
-        items=core.batch_items(self.db,batch);known=core.known_words(self.db);existing=core.existing_scene_names(self.db)
+        items=core.batch_items(self.db,batch);known=core.known_words(self.db,excluded={x["word"] for x in items});existing=core.existing_scene_names(self.db)
         self.import_summary.set("AI 正在分组分析单词…")
         def work():
             total=core.empty_classification();size=30;groups=(len(items)+size-1)//size
             for index in range(groups):
                 self.after(0,lambda n=index+1:self.import_summary.set(f"正在分析第 {n} / {groups} 组"))
+                chunk=items[index*size:(index+1)*size]
                 part=core.load_chunk(self.db,batch,index)
                 if part is None:
-                    part=core.request_json(p["base"],p["model"],p["protocol"],key,items[index*size:(index+1)*size],known,existing);core.save_chunk(self.db,batch,index,part)
+                    raw=""
+                    try:
+                        raw=core.request_batch_raw(p["base"],p["model"],p["protocol"],key,chunk,known,existing);part=core.parse_batch_response(raw,p["protocol"]);dropped=core.sanitize_links(self.db,part,chunk,items);core.validate_result(part,chunk,known);core.save_debug_response(self.db,batch,index,f"有效，已忽略 {dropped} 条无效关联" if dropped else "有效",raw.replace(key,"***"));core.save_chunk(self.db,batch,index,part)
+                    except Exception as exc:
+                        response=getattr(exc,"response_body","");content=(raw+"\n\n[本地解析或校验]\n"+str(exc)) if raw else ((response+"\n\n[HTTP 错误]\n"+str(exc)) if response else str(exc));core.save_debug_response(self.db,batch,index,"失败",content.replace(key,"***"));raise
+                else:
+                    dropped=core.sanitize_links(self.db,part,chunk,items);core.validate_result(part,chunk,known)
+                    if dropped:core.save_chunk(self.db,batch,index,part);core.save_debug_response(self.db,batch,index,f"缓存修复，已忽略 {dropped} 条无效关联",json.dumps(part,ensure_ascii=False,indent=2))
                 core.merge_classification(total,part)
                 for scene in part["scenes"]:
                     if scene["name"] not in existing:existing.append(scene["name"])
             return total
         self.async_run(work,lambda result:self._classified(batch,result))
+
+    def show_debug_responses(self):
+        batch=self.batch
+        if not batch:
+            row=self.db.execute("SELECT id FROM import_batches ORDER BY id DESC LIMIT 1").fetchone();batch=row["id"] if row else None
+        if not batch:return messagebox.showinfo("没有记录","还没有导入批次。")
+        logs=core.debug_responses(self.db,batch);win=tk.Toplevel(self);win.title("AI 调试返回");win.geometry("860x640")
+        self.label(win,"按时间保存接口原始返回和本地校验结果；不保存请求内容或 API Key。","Sub.TLabel").pack(anchor="w",padx=14,pady=10)
+        output=tk.Text(win,font=("Consolas",10),wrap="word");output.pack(fill="both",expand=True,padx=14,pady=(0,14))
+        if not logs:output.insert("end","这个批次还没有可查看的返回记录。")
+        for log in logs:output.insert("end",f"第 {log['chunk_index']+1} 组 · {log['status']} · {log['received_at']}\n{'='*72}\n{log['content']}\n\n")
+        output.configure(state="disabled")
     def _classified(self,batch,result):core.save_classification(self.db,batch,result);core.clear_chunks(self.db,batch);self.batch=batch;self.import_summary.set("分类草稿已保存");self.tabs.select(self.scene_tab);self.refresh_all()
 
     def _build_scenes(self):

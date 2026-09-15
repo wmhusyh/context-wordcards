@@ -13,6 +13,11 @@ import javax.net.ssl.HttpsURLConnection;
 /** 手机直接请求用户选定的兼容接口，不经过电脑。 */
 public final class ApiClient {
     public static final String[] FIELDS = {"meaning", "part_of_speech", "explanation", "example", "translation", "memory", "quiz", "answer"};
+    public static final class ApiResponseException extends Exception {
+        public final String responseBody;
+        ApiResponseException(String message,String body){super(message);responseBody=body;}
+    }
+    public static String responseBody(Throwable error){for(Throwable current=error;current!=null;current=current.getCause())if(current instanceof ApiResponseException)return((ApiResponseException)current).responseBody;return"";}
 
     public static String endpoint(String input, boolean responses) throws Exception {
         String base = input.trim().replaceAll("/+$", "");
@@ -147,8 +152,10 @@ public final class ApiClient {
     }
 
     public static JSONObject generateBatch(JSONArray words,JSONArray known,JSONArray existingScenes,String base,String model,String key,boolean responses)throws Exception{
-        return parseEnvelope(request(endpoint(base,responses),classificationPayload(words,known,existingScenes,model,responses,base),key),responses);
+        return parseEnvelope(generateBatchRaw(words,known,existingScenes,base,model,key,responses),responses);
     }
+
+    public static String generateBatchRaw(JSONArray words,JSONArray known,JSONArray existingScenes,String base,String model,String key,boolean responses)throws Exception{return request(endpoint(base,responses),classificationPayload(words,known,existingScenes,model,responses,base),key);}
 
     public static JSONObject emptyClassification()throws Exception{return new JSONObject().put("cards",new JSONArray()).put("scenes",new JSONArray()).put("unclassified",new JSONArray()).put("links",new JSONArray());}
     public static void mergeClassification(JSONObject target,JSONObject part)throws Exception{
@@ -187,9 +194,9 @@ public final class ApiClient {
             int code = conn.getResponseCode();
             if (code < 200 || code >= 300) {
                 String hint = code == 401 ? "检查密钥" : code == 403 ? "服务商拒绝访问" : code == 404 ? "检查地址、接口格式和模型名称" : code == 429 ? "额度不足或请求过于频繁" : code >= 300 && code < 400 ? "地址发生跳转，请填写服务商的最终接口地址" : "请检查服务商状态和接口配置";
-                String detail="";InputStream error=conn.getErrorStream();if(error!=null)try{String raw=readLimited(error,32768);JSONObject envelope=new JSONObject(raw);detail=envelope.optJSONObject("error")!=null?envelope.optJSONObject("error").optString("message"):envelope.optString("message");}catch(Exception ignored){}
+                String detail="",raw="";InputStream error=conn.getErrorStream();if(error!=null)try{raw=readLimited(error,32768);JSONObject envelope=new JSONObject(raw);detail=envelope.optJSONObject("error")!=null?envelope.optJSONObject("error").optString("message"):envelope.optString("message");}catch(Exception ignored){}
                 detail=detail.replaceAll("\\s+"," ").trim();if(detail.length()>240)detail=detail.substring(0,240)+"…";
-                throw new Exception("HTTP " + code + "：" + hint + (detail.isEmpty()?"":"。服务商提示："+detail) + "。未保存新词。");
+                throw new ApiResponseException("HTTP " + code + "：" + hint + (detail.isEmpty()?"":"。服务商提示："+detail) + "。未保存新词。",raw);
             }
             try (InputStream in = conn.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buffer = new byte[8192]; int count;

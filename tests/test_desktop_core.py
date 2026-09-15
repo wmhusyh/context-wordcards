@@ -30,7 +30,7 @@ class CoreTests(unittest.TestCase):
             db.execute("INSERT INTO words VALUES(?,?,?,?,?)",("legacy",json.dumps({"meaning":"旧词"}),"api",3,"2030-01-02"));db.commit();db.close()
             migrated=core.connect(path);row=migrated.execute("SELECT * FROM words WHERE word='legacy'").fetchone()
             self.assertEqual((row["stage"],row["due"],row["mastery"]),(3,"2030-01-02",0))
-            for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links","classification_chunks"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
+            for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links","classification_chunks","api_debug_responses"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
             migrated.close()
 
     def test_classification_and_links_are_persistent_and_adjustable(self):
@@ -86,5 +86,17 @@ class CoreTests(unittest.TestCase):
             merged=core.merge_classification(core.empty_classification(),first);core.merge_classification(merged,second)
             self.assertEqual(len(merged["scenes"]),1);self.assertEqual({x["word"] for x in merged["scenes"][0]["members"]},{"passport","boarding pass"})
             core.clear_chunks(db,batch);self.assertIsNone(core.load_chunk(db,batch,0));db.close()
+
+    def test_debug_response_and_invalid_optional_links(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=core.connect(Path(folder)/"words.db")
+            content=json.dumps({"meaning":"旅行"},ensure_ascii=False)
+            db.executemany("INSERT INTO words(word,content,source,stage,due,mastery) VALUES(?,?,?,?,?,?)",[("travel",content,"legacy",3,"2030-01-01",2),("passport",content,"legacy",0,"2030-01-01",0)]);db.commit()
+            whole=[{"word":"passport","meaning":"护照"},{"word":"boarding pass","meaning":"登机牌"}];chunk=[whole[0]]
+            self.assertEqual([x["word"] for x in core.known_words(db,excluded={x["word"] for x in whole})],["travel"])
+            result={"links":[{"new_word":"passport","old_word":"travel","reason":"旅行需要护照"},{"new_word":"passport","old_word":"boarding pass","reason":"同批新词"},{"new_word":"passport","old_word":"missing","reason":"不存在"}]}
+            self.assertEqual(core.sanitize_links(db,result,chunk,whole),2);self.assertEqual(result["links"][0]["old_word"],"travel")
+            core.save_debug_response(db,9,0,"有效，已忽略 2 条无效关联",'{"ok":true}')
+            logs=core.debug_responses(db,9);self.assertEqual((logs[0]["status"],logs[0]["content"]),("有效，已忽略 2 条无效关联",'{"ok":true}'));db.close()
 
 if __name__=="__main__":unittest.main(verbosity=2)
