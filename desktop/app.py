@@ -76,10 +76,22 @@ class App(tk.Tk):
         p=self.active_profile();key=self.keys.get(p["name"],"") if p else ""
         if not p or not key:self.tabs.select(self.api_tab);return messagebox.showinfo("需要 API 密钥","请先填写并验证 API 密钥。导入批次已经保存。")
         if replace and not messagebox.askyesno("重新分类","这会替换本批的分类和人工调整，是否继续？"):return
-        items=core.batch_items(self.db,batch);known=core.known_words(self.db)
-        self.import_summary.set("AI 正在从整批单词中分析场景…")
-        self.async_run(lambda:core.request_json(p["base"],p["model"],p["protocol"],key,items,known),lambda result:self._classified(batch,result))
-    def _classified(self,batch,result):core.save_classification(self.db,batch,result);self.batch=batch;self.import_summary.set("分类草稿已保存");self.tabs.select(self.scene_tab);self.refresh_all()
+        if replace:core.clear_chunks(self.db,batch)
+        items=core.batch_items(self.db,batch);known=core.known_words(self.db);existing=core.existing_scene_names(self.db)
+        self.import_summary.set("AI 正在分组分析单词…")
+        def work():
+            total=core.empty_classification();size=30;groups=(len(items)+size-1)//size
+            for index in range(groups):
+                self.after(0,lambda n=index+1:self.import_summary.set(f"正在分析第 {n} / {groups} 组"))
+                part=core.load_chunk(self.db,batch,index)
+                if part is None:
+                    part=core.request_json(p["base"],p["model"],p["protocol"],key,items[index*size:(index+1)*size],known,existing);core.save_chunk(self.db,batch,index,part)
+                core.merge_classification(total,part)
+                for scene in part["scenes"]:
+                    if scene["name"] not in existing:existing.append(scene["name"])
+            return total
+        self.async_run(work,lambda result:self._classified(batch,result))
+    def _classified(self,batch,result):core.save_classification(self.db,batch,result);core.clear_chunks(self.db,batch);self.batch=batch;self.import_summary.set("分类草稿已保存");self.tabs.select(self.scene_tab);self.refresh_all()
 
     def _build_scenes(self):
         frame=ttk.Frame(self.scene_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"场景分类预览","Title.TLabel").pack(anchor="w");self.scene_status=tk.StringVar();self.label(frame,"","Sub.TLabel").configure(textvariable=self.scene_status);self.scene_tree=ttk.Treeview(frame,columns=("reason","id"),show="tree headings");self.scene_tree.heading("#0",text="场景 / 单词");self.scene_tree.heading("reason",text="分类理由");self.scene_tree.column("id",width=0,stretch=False);self.scene_tree.pack(fill="both",expand=True,pady=10)
@@ -156,7 +168,12 @@ class App(tk.Tk):
     def selected_word(self):return self.word_tree.focus()
     def set_mastery(self,value):
         word=self.selected_word();
-        if word:self.db.execute("UPDATE words SET mastery=? WHERE word=?",(value,word));self.db.commit();self.refresh_words()
+        if word:
+            self.db.execute("UPDATE words SET mastery=? WHERE word=?",(value,word));self.db.commit();self.refresh_words()
+            if value==2:
+                row=self.db.execute("SELECT word FROM words WHERE mastery<2 AND word<>? ORDER BY CASE WHEN word>? THEN 0 ELSE 1 END,word LIMIT 1",(word,word)).fetchone()
+                if row:self.word_tree.selection_set(row[0]);self.word_tree.focus(row[0]);self.word_tree.see(row[0]);self.word_detail()
+                else:messagebox.showinfo("全部掌握","所有单词都已标记为掌握")
     def word_detail(self):
         word=self.selected_word();
         if not word:return
@@ -165,15 +182,23 @@ class App(tk.Tk):
         messagebox.showinfo("词卡详情","\n".join(lines))
 
     def _build_review(self):
-        frame=ttk.Frame(self.review_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"今天复习","Title.TLabel").pack(anchor="w");self.review_text=tk.Text(frame,wrap="word",font=("Microsoft YaHei UI",12),state="disabled");self.review_text.pack(fill="both",expand=True,pady=10);bar=ttk.Frame(frame);bar.pack();ttk.Button(bar,text="显示答案",command=self.reveal_review).pack(side="left");
-        for n,r in [("不认识",3),("有点模糊",2),("认识",1)]:ttk.Button(bar,text=n,command=lambda x=r:self.rate_review(x)).pack(side="left",padx=4)
-    def refresh_review(self):self.review_row=self.db.execute("SELECT * FROM words WHERE due<=? ORDER BY due,word LIMIT 1",(date.today().isoformat(),)).fetchone();self._set_review((self.review_row["word"]+"\n\n先回忆意思、场景和关联旧词。") if self.review_row else "今天的复习完成了。")
+        frame=ttk.Frame(self.review_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"今天复习","Title.TLabel").pack(anchor="w");self.review_text=tk.Text(frame,wrap="word",font=("Microsoft YaHei UI",12),state="disabled");self.review_text.pack(fill="both",expand=True,pady=10);self.review_answer=tk.StringVar();ttk.Entry(frame,textvariable=self.review_answer,font=("Microsoft YaHei UI",12)).pack(fill="x",pady=(0,8));bar=ttk.Frame(frame);bar.pack();ttk.Button(bar,text="提交手工答案",command=self.reveal_review).pack(side="left");self.rating_buttons=[]
+        for n,r in [("不认识",3),("有点模糊",2),("认识",1)]:button=ttk.Button(bar,text=n,command=lambda x=r:self.rate_review(x),state="disabled");button.pack(side="left",padx=4);self.rating_buttons.append(button)
+    def refresh_review(self):
+        self.review_row=self.db.execute("SELECT * FROM words WHERE due<=? ORDER BY due,word LIMIT 1",(date.today().isoformat(),)).fetchone();self.review_submitted=False;self.review_answer.set("")
+        for button in self.rating_buttons:button.configure(state="disabled")
+        if self.review_row:
+            content=json.loads(self.review_row["content"]);self._set_review((content.get("quiz") or self.review_row["word"])+"\n\n请手工输入答案，提交后查看参考答案。")
+        else:self._set_review("今天的复习完成了。")
     def _set_review(self,s):self.review_text.configure(state="normal");self.review_text.delete("1.0","end");self.review_text.insert("1.0",s);self.review_text.configure(state="disabled")
     def reveal_review(self):
         if not self.review_row:return
-        word=self.review_row["word"];content=json.loads(self.review_row["content"]);scenes="\n".join("• "+x[0]+" — "+x[1] for x in self.db.execute("SELECT s.name,sw.reason FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(word,)));links="\n".join("• "+x[0]+" — "+x[1]+"\n  "+x[2] for x in self.db.execute("SELECT old_word,reason,example FROM word_links WHERE new_word=?",(word,)));self._set_review(f"{word}\n{content.get('meaning','')}\n\n{content.get('example','')}\n{content.get('translation','')}\n\n场景\n{scenes or '暂无'}\n\n关联旧词\n{links or '暂无合理关联'}")
+        typed=self.review_answer.get().strip()
+        if not typed:return messagebox.showinfo("请输入答案","提交前需要手工输入答案")
+        word=self.review_row["word"];content=json.loads(self.review_row["content"]);scenes="\n".join("• "+x[0]+" — "+x[1] for x in self.db.execute("SELECT s.name,sw.reason FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(word,)));links="\n".join("• "+x[0]+" — "+x[1]+"\n  "+x[2] for x in self.db.execute("SELECT old_word,reason,example FROM word_links WHERE new_word=?",(word,)));self._set_review(f"你的答案\n{typed}\n\n参考答案\n{content.get('answer') or word}\n\n{word} — {content.get('meaning','')}\n{content.get('example','')}\n{content.get('translation','')}\n\n场景\n{scenes or '暂无'}\n\n关联旧词\n{links or '暂无合理关联'}");self.review_submitted=True
+        for button in self.rating_buttons:button.configure(state="normal")
     def rate_review(self,rating):
-        if not self.review_row:return
+        if not self.review_row or not self.review_submitted:return messagebox.showinfo("先提交答案","需要先手工输入并提交答案")
         stage,due=core.schedule(self.review_row["stage"],rating,date.today());mastery=max(self.review_row["mastery"],1 if rating==1 else 0);self.db.execute("UPDATE words SET stage=?,due=?,mastery=? WHERE word=?",(stage,due,mastery,self.review_row["word"]));self.db.commit();self.refresh_review();self.refresh_words()
 
     def _build_api(self):

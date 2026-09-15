@@ -30,7 +30,7 @@ class CoreTests(unittest.TestCase):
             db.execute("INSERT INTO words VALUES(?,?,?,?,?)",("legacy",json.dumps({"meaning":"旧词"}),"api",3,"2030-01-02"));db.commit();db.close()
             migrated=core.connect(path);row=migrated.execute("SELECT * FROM words WHERE word='legacy'").fetchone()
             self.assertEqual((row["stage"],row["due"],row["mastery"]),(3,"2030-01-02",0))
-            for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
+            for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links","classification_chunks"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
             migrated.close()
 
     def test_classification_and_links_are_persistent_and_adjustable(self):
@@ -76,5 +76,15 @@ class CoreTests(unittest.TestCase):
     def test_responses_verification_accepts_token_limited_result(self):
         core.validate_verification_envelope({"status":"incomplete"},"responses")
         with self.assertRaises(ValueError):core.validate_verification_envelope({"status":"failed"},"responses")
+
+    def test_chunk_cache_and_scene_merge(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=core.connect(Path(folder)/"words.db");batch=core.create_batch(db,core.parse_import("passport\nboarding pass"),"paste")
+            first={"cards":[{"word":"passport"}],"scenes":[{"name":"机场值机","members":[{"word":"passport","reason":"核验身份"}]}],"unclassified":[],"links":[]}
+            second={"cards":[{"word":"boarding pass"}],"scenes":[{"name":"机场值机","members":[{"word":"boarding pass","reason":"用于登机"}]}],"unclassified":[],"links":[]}
+            core.save_chunk(db,batch,0,first);self.assertEqual(core.load_chunk(db,batch,0),first)
+            merged=core.merge_classification(core.empty_classification(),first);core.merge_classification(merged,second)
+            self.assertEqual(len(merged["scenes"]),1);self.assertEqual({x["word"] for x in merged["scenes"][0]["members"]},{"passport","boarding pass"})
+            core.clear_chunks(db,batch);self.assertIsNone(core.load_chunk(db,batch,0));db.close()
 
 if __name__=="__main__":unittest.main(verbosity=2)

@@ -25,10 +25,11 @@ public final class DataStore {
             db.execSQL("CREATE TABLE IF NOT EXISTS scene_words(scene_id INTEGER NOT NULL,word TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',PRIMARY KEY(scene_id,word))");
             db.execSQL("CREATE TABLE IF NOT EXISTS unclassified(batch_id INTEGER NOT NULL,word TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',PRIMARY KEY(batch_id,word))");
             db.execSQL("CREATE TABLE IF NOT EXISTS word_links(id INTEGER PRIMARY KEY AUTOINCREMENT,batch_id INTEGER NOT NULL,new_word TEXT NOT NULL,old_word TEXT NOT NULL,relation TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL,example TEXT NOT NULL DEFAULT '',UNIQUE(batch_id,new_word,old_word))");
+            db.execSQL("CREATE TABLE IF NOT EXISTS classification_chunks(batch_id INTEGER NOT NULL,chunk_index INTEGER NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(batch_id,chunk_index))");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_batches_status ON import_batches(status,id)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_scene_words_word ON scene_words(word)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_links_new_word ON word_links(new_word)");
-            db.setVersion(2); db.setTransactionSuccessful();
+            db.setVersion(3); db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
     }
     private void addColumn(String table, String column, String definition) {
@@ -54,6 +55,10 @@ public final class DataStore {
         JSONArray items=new JSONArray();try(Cursor c=db.rawQuery("SELECT word,content,mastery FROM words ORDER BY mastery DESC,stage DESC,word LIMIT ?",new String[]{Integer.toString(limit)})){while(c.moveToNext()){JSONObject content=new JSONObject(c.getString(1));items.put(new JSONObject().put("word",c.getString(0)).put("meaning",content.optString("meaning")).put("mastery",c.getInt(2)).put("scenes",scenesFor(c.getString(0))));}}return items;
     }
     public JSONArray scenesFor(String word) throws Exception { JSONArray out=new JSONArray();try(Cursor c=db.rawQuery("SELECT s.name,sw.reason FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id JOIN import_batches b ON b.id=s.batch_id WHERE sw.word=? AND b.status='confirmed' ORDER BY s.id",new String[]{word})){while(c.moveToNext())out.put(new JSONObject().put("name",c.getString(0)).put("reason",c.getString(1)));}return out; }
+    public JSONArray existingSceneNames(int limit)throws Exception{JSONArray out=new JSONArray();try(Cursor c=db.rawQuery("SELECT DISTINCT s.name FROM scenes s JOIN import_batches b ON b.id=s.batch_id WHERE b.status='confirmed' ORDER BY s.name LIMIT ?",new String[]{Integer.toString(limit)})){while(c.moveToNext())out.put(c.getString(0));}return out;}
+    public void saveChunk(long batchId,int index,JSONObject result){ContentValues v=new ContentValues();v.put("batch_id",batchId);v.put("chunk_index",index);v.put("result",result.toString());v.put("created_at",LocalDateTime.now().toString());db.insertWithOnConflict("classification_chunks",null,v,SQLiteDatabase.CONFLICT_REPLACE);}
+    public JSONObject loadChunk(long batchId,int index)throws Exception{try(Cursor c=db.rawQuery("SELECT result FROM classification_chunks WHERE batch_id=? AND chunk_index=?",new String[]{Long.toString(batchId),Integer.toString(index)})){return c.moveToFirst()?new JSONObject(c.getString(0)):null;}}
+    public void clearChunks(long batchId){db.delete("classification_chunks","batch_id=?",new String[]{Long.toString(batchId)});}
 
     public void saveClassification(long batchId, JSONObject result) throws Exception {
         validate(result, batchItems(batchId));
@@ -72,13 +77,14 @@ public final class DataStore {
         java.util.HashSet<String> allowed=new java.util.HashSet<>();for(int i=0;i<input.length();i++)allowed.add(input.getJSONObject(i).getString("word"));
         JSONArray cards=result.getJSONArray("cards");java.util.HashSet<String> cardWords=new java.util.HashSet<>();for(int i=0;i<cards.length();i++){JSONObject c=cards.getJSONObject(i);String w=c.getString("word");if(!allowed.contains(w)||!cardWords.add(w))throw new Exception("AI 返回了批次外或重复的单词。");if(c.optString("meaning").trim().isEmpty())throw new Exception("AI 返回的词卡缺少释义。");}
         if(!cardWords.equals(allowed))throw new Exception("AI 没有为所有有效单词生成词卡。");
-        JSONArray scenes=result.getJSONArray("scenes");int maxScenes=allowed.size()==1?1:Math.min(20,Math.max(3,(allowed.size()*2+2)/3));if(scenes.length()>maxScenes)throw new Exception("AI 返回的场景数量过多。");
+        JSONArray scenes=result.getJSONArray("scenes");int maxScenes=allowed.size()==1?1:Math.min(60,Math.max(3,(allowed.size()+3)/4+5));if(scenes.length()>maxScenes)throw new Exception("AI 返回的场景数量过多。");
         java.util.HashSet<String> covered=new java.util.HashSet<>();
         for(int i=0;i<scenes.length();i++){JSONObject s=scenes.getJSONObject(i);if(s.optString("name").trim().isEmpty())throw new Exception("场景名称为空。");JSONArray members=s.getJSONArray("members");if(members.length()==0)throw new Exception("AI 返回了空场景。");for(int j=0;j<members.length();j++){JSONObject member=members.getJSONObject(j);String word=member.getString("word");if(!allowed.contains(word)||member.optString("reason").trim().isEmpty())throw new Exception("场景成员无效。");covered.add(word);}}
         JSONArray missing=result.getJSONArray("unclassified");for(int i=0;i<missing.length();i++){JSONObject item=missing.getJSONObject(i);String word=item.getString("word");if(!allowed.contains(word)||item.optString("reason").trim().isEmpty())throw new Exception("无法分类列表无效。");covered.add(word);}
         if(!covered.equals(allowed))throw new Exception("AI 没有为所有新词给出场景或无法分类说明。");
         JSONArray links=result.getJSONArray("links");for(int i=0;i<links.length();i++){JSONObject link=links.getJSONObject(i);String newWord=link.getString("new_word"),oldWord=link.getString("old_word");if(!allowed.contains(newWord)||allowed.contains(oldWord)||link.optString("reason").trim().isEmpty()||!wordExists(oldWord))throw new Exception("AI 返回了批次外或无理由的关联。");}
     }
+    public void validateClassification(JSONObject result,JSONArray input)throws Exception{validate(result,input);}
 
     private boolean wordExists(String word){try(Cursor c=db.rawQuery("SELECT 1 FROM words WHERE word=? LIMIT 1",new String[]{word})){return c.moveToFirst();}}
 
