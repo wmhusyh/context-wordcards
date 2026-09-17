@@ -30,7 +30,7 @@ class CoreTests(unittest.TestCase):
             db.execute("INSERT INTO words VALUES(?,?,?,?,?)",("legacy",json.dumps({"meaning":"旧词"}),"api",3,"2030-01-02"));db.commit();db.close()
             migrated=core.connect(path);row=migrated.execute("SELECT * FROM words WHERE word='legacy'").fetchone()
             self.assertEqual((row["stage"],row["due"],row["mastery"]),(3,"2030-01-02",0));self.assertIsNotNone(row["learned_at"])
-            for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links","classification_chunks","api_debug_responses","review_attempts"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
+            for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links","classification_chunks","api_debug_responses","review_attempts","scene_summaries","memory_chat"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
             migrated.close()
 
     def test_classification_and_links_are_persistent_and_adjustable(self):
@@ -49,6 +49,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM scene_words WHERE word='passport'").fetchone()[0],2)
             self.assertEqual(db.execute("SELECT old_word FROM word_links WHERE new_word='passport'").fetchone()[0],"travel")
             self.assertIsNone(db.execute("SELECT learned_at FROM words WHERE word='passport'").fetchone()[0])
+            grouped=core.all_scenes(db);self.assertEqual({x["name"] for x in grouped},{"机场值机","厨房做饭","旅行准备"})
             with db:
                 db.execute("UPDATE scenes SET name='机场手续',user_modified=1 WHERE name='机场值机'")
                 db.execute("UPDATE import_batches SET status='confirmed' WHERE id=?",(batch,))
@@ -107,5 +108,14 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             db=core.connect(Path(folder)/"words.db");core.save_review_attempt(db,"check in","question","answer",result,envelope)
             row=db.execute("SELECT rating,verdict FROM review_attempts WHERE word='check in'").fetchone();self.assertEqual(tuple(row),(2,"部分正确"));db.close()
+
+    def test_scene_summary_and_memory_chat_are_cached(self):
+        scene_result={"overview":"机场办理手续","connections":"护照用于核验，登机牌用于登机","differences":"证件与通行凭证不同","memory_path":"先出示护照，再领取登机牌"}
+        coach={"score":86,"remembered":True,"verdict":"已经记住","feedback":"含义和用法正确","explanation":"passport 指护照","next_question":"请说一个常见搭配"}
+        def envelope(value):return json.dumps({"choices":[{"finish_reason":"stop","message":{"content":json.dumps(value,ensure_ascii=False)}}]},ensure_ascii=False)
+        self.assertEqual(core.parse_scene_summary(envelope(scene_result),"chat")["overview"],"机场办理手续");self.assertTrue(core.parse_memory_coach(envelope(coach),"chat")["remembered"])
+        with tempfile.TemporaryDirectory() as folder:
+            db=core.connect(Path(folder)/"words.db");scene={"name":"机场值机","fingerprint":"abc","members":[]};core.save_scene_summary(db,scene,scene_result,envelope(scene_result));self.assertEqual(core.scene_summary(db,"机场值机","abc")["differences"],"证件与通行凭证不同")
+            core.save_memory_turn(db,"passport","问题","回答",coach,envelope(coach));turns=core.memory_turns(db,"passport");self.assertEqual((turns[0]["result"]["score"],turns[0]["answer"]),(86,"回答"));db.close()
 
 if __name__=="__main__":unittest.main(verbosity=2)

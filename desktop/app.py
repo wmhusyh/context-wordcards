@@ -116,34 +116,44 @@ class App(tk.Tk):
     def _build_scenes(self):
         frame=ttk.Frame(self.scene_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"场景分类预览","Title.TLabel").pack(anchor="w");self.scene_status=tk.StringVar();self.label(frame,"","Sub.TLabel").configure(textvariable=self.scene_status);self.scene_tree=ttk.Treeview(frame,columns=("reason","id"),show="tree headings");self.scene_tree.heading("#0",text="场景 / 单词");self.scene_tree.heading("reason",text="分类理由");self.scene_tree.column("id",width=0,stretch=False);self.scene_tree.pack(fill="both",expand=True,pady=10)
         bar=ttk.Frame(frame);bar.pack(fill="x");
-        for text,cmd in [("重命名",self.rename_scene),("移动",self.move_word),("合并",self.merge_scene),("拆分",self.split_scene),("确认分类",self.confirm_batch),("重新分类",self.reclassify)]:ttk.Button(bar,text=text,command=cmd).pack(side="left",padx=(0,6))
+        for text,cmd in [("AI总结联系/区别",self.summarize_scene),("重命名",self.rename_scene),("移动",self.move_word),("合并",self.merge_scene),("拆分",self.split_scene),("确认来源分类",self.confirm_batch),("重新分类",self.reclassify)]:ttk.Button(bar,text=text,command=cmd).pack(side="left",padx=(0,6))
     def refresh_scenes(self):
-        self.scene_tree.delete(*self.scene_tree.get_children());batch=self.batch
-        if not batch:
-            row=self.db.execute("SELECT id FROM import_batches WHERE status IN ('draft','confirmed') ORDER BY id DESC LIMIT 1").fetchone();batch=row[0] if row else None;self.batch=batch
-        if not batch:self.scene_status.set("尚无分类结果");return
-        status=self.db.execute("SELECT status FROM import_batches WHERE id=?",(batch,)).fetchone()[0];self.scene_status.set(f"批次 {batch} · {'待确认' if status=='draft' else '已确认'}；调整立即保存，不会自动重算")
-        counts={r[0]:r[1] for r in self.db.execute("SELECT sw.word,count(*) FROM scene_words sw JOIN scenes s ON s.id=sw.scene_id WHERE s.batch_id=? GROUP BY sw.word",(batch,))}
-        for scene in self.db.execute("SELECT id,name FROM scenes WHERE batch_id=? ORDER BY position,id",(batch,)):
-            parent=self.scene_tree.insert("","end",text=scene["name"],values=("",f"scene:{scene['id']}"),open=True)
-            for m in self.db.execute("SELECT word,reason FROM scene_words WHERE scene_id=? ORDER BY word",(scene["id"],)):self.scene_tree.insert(parent,"end",text=m["word"]+(" · 多场景" if counts.get(m["word"],0)>1 else ""),values=(m["reason"],f"word:{scene['id']}:{m['word']}"))
-        missing=list(self.db.execute("SELECT word,reason FROM unclassified WHERE batch_id=?",(batch,)))
-        if missing:
-            parent=self.scene_tree.insert("","end",text="无法准确判断",values=("","unknown"),open=True)
-            for m in missing:self.scene_tree.insert(parent,"end",text=m["word"],values=(m["reason"],"unknown"))
+        self.scene_tree.delete(*self.scene_tree.get_children());self.scene_lookup={};scenes=core.all_scenes(self.db)
+        if not scenes:self.scene_status.set("尚无分类结果");return
+        self.scene_status.set(f"共 {len(scenes)} 个场景；点击箭头展开，AI 总结会缓存到本地")
+        for scene in scenes:
+            parent=self.scene_tree.insert("","end",text=f"{scene['name']} · {len(scene['members'])} 个词",values=("",f"scene:{scene['scene_id']}"),open=False);self.scene_lookup[parent]=scene
+            for member in scene["members"]:self.scene_tree.insert(parent,"end",text=member["word"]+(f" · {member['meaning']}" if member["meaning"] else ""),values=(member["reason"],f"word:{scene['scene_id']}:{member['word']}"))
+            summary=core.scene_summary(self.db,scene["name"],scene["fingerprint"])
+            if summary:
+                for key,label in [("overview","整体情境"),("connections","单词联系"),("differences","区别对比"),("memory_path","记忆路线")]:self.scene_tree.insert(parent,"end",text="AI · "+label,values=(summary[key],"summary"))
+            else:self.scene_tree.insert(parent,"end",text="AI · 尚未生成总结",values=("选择场景后点击“AI总结联系/区别”","summary"))
     def selected_scene(self):
-        item=self.scene_tree.focus();raw=self.scene_tree.set(item,"id") if item else ""
+        item=self.scene_tree.focus();raw=self.scene_tree.set(item,"id") if item else "";parent=item if item in getattr(self,"scene_lookup",{}) else self.scene_tree.parent(item)
+        scene=getattr(self,"scene_lookup",{}).get(parent)
+        if scene:self.batch=scene["batch_id"]
         if raw.startswith("scene:"):return int(raw.split(":")[1])
         if raw.startswith("word:"):return int(raw.split(":")[1])
         return None
+    def selected_scene_data(self):
+        item=self.scene_tree.focus();parent=item if item in getattr(self,"scene_lookup",{}) else self.scene_tree.parent(item);return getattr(self,"scene_lookup",{}).get(parent)
+    def summarize_scene(self):
+        scene=self.selected_scene_data()
+        if not scene:return messagebox.showinfo("请选择场景","先选择一个场景标题或其中的单词")
+        p=self.active_profile();key=self.keys.get(p["name"],"") if p else ""
+        if not p or not key:self.tabs.select(self.api_tab);return messagebox.showinfo("需要 API 密钥","生成场景总结需要 API 密钥")
+        def work():
+            raw=core.request_scene_summary_raw(p["base"],p["model"],p["protocol"],key,scene);result=core.parse_scene_summary(raw,p["protocol"]);core.save_scene_summary(self.db,scene,result,raw.replace(key,"***"));return result
+        self.async_run(work,lambda result:self.refresh_scenes())
     def rename_scene(self):
         sid=self.selected_scene();
         if not sid:return messagebox.showinfo("请选择场景","先选择一个场景")
         old=self.db.execute("SELECT name FROM scenes WHERE id=?",(sid,)).fetchone()[0];name=simpledialog.askstring("重命名","新名称",initialvalue=old)
         if name and name.strip():self.db.execute("UPDATE scenes SET name=?,user_modified=1 WHERE id=?",(name.strip(),sid));self.db.commit();self.refresh_scenes()
     def move_word(self):
-        item=self.scene_tree.focus();raw=self.scene_tree.set(item,"id") if item else ""
+        item=self.scene_tree.focus();raw=self.scene_tree.set(item,"id") if item else "";scene=self.selected_scene_data()
         if not raw.startswith("word:"):return messagebox.showinfo("请选择单词","在场景下选择一个单词")
+        if scene:self.batch=scene["batch_id"]
         _,from_id,word=raw.split(":",2);targets=list(self.db.execute("SELECT id,name FROM scenes WHERE batch_id=? AND id<>?",(self.batch,from_id)))
         target=simpledialog.askstring("移动单词","目标场景名称\n"+"、".join(x["name"] for x in targets))
         match=next((x for x in targets if x["name"]==target),None)
@@ -178,7 +188,7 @@ class App(tk.Tk):
     def _build_words(self):
         frame=ttk.Frame(self.word_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"我的单词本","Title.TLabel").pack(anchor="w");self.word_search=tk.StringVar();entry=ttk.Entry(frame,textvariable=self.word_search);entry.pack(fill="x",pady=8);entry.bind("<KeyRelease>",lambda e:self.refresh_words());self.word_tree=ttk.Treeview(frame,columns=("meaning","mastery","scenes"),show="headings");
         for c,n in [("meaning","单词与释义"),("mastery","熟悉程度"),("scenes","场景")]:self.word_tree.heading(c,text=n)
-        self.word_tree.pack(fill="both",expand=True);self.word_tree.bind("<Double-1>",lambda e:self.word_detail());bar=ttk.Frame(frame);bar.pack(fill="x",pady=8);ttk.Button(bar,text="查看详情",command=self.word_detail).pack(side="left");ttk.Button(bar,text="学完，加入记忆曲线",command=self.start_learning).pack(side="left",padx=6);ttk.Button(bar,text="标记熟悉",command=lambda:self.set_mastery(1)).pack(side="left");ttk.Button(bar,text="标记已掌握",command=lambda:self.set_mastery(2)).pack(side="left",padx=6)
+        self.word_tree.pack(fill="both",expand=True);self.word_tree.bind("<Double-1>",lambda e:self.word_detail());bar=ttk.Frame(frame);bar.pack(fill="x",pady=8);ttk.Button(bar,text="查看详情",command=self.word_detail).pack(side="left");ttk.Button(bar,text="和 AI 互动检查记忆",command=self.memory_coach).pack(side="left",padx=6);ttk.Button(bar,text="学完，加入记忆曲线",command=self.start_learning).pack(side="left");ttk.Button(bar,text="标记熟悉",command=lambda:self.set_mastery(1)).pack(side="left",padx=6);ttk.Button(bar,text="标记已掌握",command=lambda:self.set_mastery(2)).pack(side="left")
     def refresh_words(self):
         self.word_tree.delete(*self.word_tree.get_children());q=self.word_search.get().lower() if hasattr(self,"word_search") else ""
         for r in self.db.execute("SELECT word,content,mastery,learned_at FROM words ORDER BY word"):
@@ -207,6 +217,29 @@ class App(tk.Tk):
         r=self.db.execute("SELECT content FROM words WHERE word=?",(word,)).fetchone();content=json.loads(r[0]);scenes=list(self.db.execute("SELECT s.name,sw.reason FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(word,)));links=list(self.db.execute("SELECT old_word,relation,reason,example FROM word_links WHERE new_word=?",(word,)))
         lines=[word,content.get("meaning","")]+[f"{k}: {content.get(k,'')}" for k in core.FIELDS[1:] if content.get(k)]+["","所属场景:"]+[f"• {x['name']} — {x['reason']}" for x in scenes]+["","关联旧词:"]+[f"• {x['old_word']} / {x['relation']}\n  {x['reason']}\n  {x['example']}" for x in links]
         messagebox.showinfo("词卡详情","\n".join(lines))
+    def memory_coach(self):
+        word=self.selected_word()
+        if not word:return messagebox.showinfo("请选择单词","先在单词本选择一个单词")
+        self.memory_word=word;self.memory_win=tk.Toplevel(self);self.memory_win.title("AI 互动检查 · "+word);self.memory_win.geometry("780x650");self.memory_output=tk.Text(self.memory_win,wrap="word",font=("Microsoft YaHei UI",11),state="disabled");self.memory_output.pack(fill="both",expand=True,padx=14,pady=14);self.memory_answer=tk.StringVar();ttk.Entry(self.memory_win,textvariable=self.memory_answer,font=("Microsoft YaHei UI",11)).pack(fill="x",padx=14);bar=ttk.Frame(self.memory_win);bar.pack(fill="x",padx=14,pady=12);ttk.Button(bar,text="发送给 AI",command=self.send_memory_answer).pack(side="left");self.memory_familiar=ttk.Button(bar,text="AI 判断已记住：标记熟悉",command=lambda:self.mark_memory_familiar(word),state="disabled");self.memory_familiar.pack(side="left",padx=8);self.render_memory_coach()
+    def render_memory_coach(self):
+        turns=core.memory_turns(self.db,self.memory_word);last=turns[-1] if turns else None;self.memory_question=(last["result"].get("next_question") if last else f"不用查看词卡，请解释 “{self.memory_word}” 的核心含义，并给出一个自然使用场景。")
+        lines=["AI 会从不同角度连续追问，判断你能否主动回忆。",""]
+        for turn in turns[-3:]:
+            result=turn["result"];lines.extend(["问题："+turn["question"],"你的回答："+turn["answer"],f"AI：{result.get('verdict','')} · {result.get('score',0)} 分",result.get("feedback",""),result.get("explanation",""),""])
+        lines.extend(["下一题：",self.memory_question]);self._set_memory("\n".join(lines));self.memory_answer.set("");self.memory_familiar.configure(state="normal" if last and last["result"].get("remembered") else "disabled")
+    def _set_memory(self,text):self.memory_output.configure(state="normal");self.memory_output.delete("1.0","end");self.memory_output.insert("1.0",text);self.memory_output.configure(state="disabled")
+    def send_memory_answer(self):
+        answer=self.memory_answer.get().strip()
+        if not answer:return messagebox.showinfo("请输入回答","先回答当前问题")
+        p=self.active_profile();key=self.keys.get(p["name"],"") if p else ""
+        if not p or not key:self.tabs.select(self.api_tab);return messagebox.showinfo("需要 API 密钥","互动检查需要 API 密钥")
+        word=self.memory_word;row=self.db.execute("SELECT content FROM words WHERE word=?",(word,)).fetchone();card=json.loads(row[0]);turns=core.memory_turns(self.db,word);history=[{"question":x["question"],"answer":x["answer"],"score":x["result"].get("score"),"verdict":x["result"].get("verdict")} for x in turns[-4:]];question=self.memory_question
+        def work():
+            raw=core.request_memory_coach_raw(p["base"],p["model"],p["protocol"],key,card,history,question,answer);result=core.parse_memory_coach(raw,p["protocol"]);core.save_memory_turn(self.db,word,question,answer,result,raw.replace(key,"***"));return result
+        self.async_run(work,lambda result:self.render_memory_coach())
+    def mark_memory_familiar(self,word):
+        with self.db:self.db.execute("UPDATE words SET mastery=MAX(mastery,1),learned_at=COALESCE(learned_at,?),stage=CASE WHEN learned_at IS NULL THEN 0 ELSE stage END,due=CASE WHEN learned_at IS NULL THEN ? ELSE due END WHERE word=?",(__import__('datetime').datetime.now().isoformat(),(date.today()+timedelta(days=1)).isoformat(),word))
+        self.refresh_words();messagebox.showinfo("已加入记忆曲线","已标记为熟悉；如果此前未学习，明天开始第一次复习。")
 
     def _build_review(self):
         frame=ttk.Frame(self.review_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"今天复习","Title.TLabel").pack(anchor="w");self.review_text=tk.Text(frame,wrap="word",font=("Microsoft YaHei UI",12),state="disabled");self.review_text.pack(fill="both",expand=True,pady=10);self.review_answer=tk.StringVar();ttk.Entry(frame,textvariable=self.review_answer,font=("Microsoft YaHei UI",12)).pack(fill="x",pady=(0,8));bar=ttk.Frame(frame);bar.pack();self.review_submit=ttk.Button(bar,text="提交给 AI 评判",command=self.reveal_review);self.review_submit.pack(side="left");self.review_next=ttk.Button(bar,text="继续下一个乱序复习",command=self.refresh_review,state="disabled");self.review_next.pack(side="left",padx=8)
