@@ -1,7 +1,7 @@
 """Tkinter desktop app. Run: python desktop/app.py"""
 from __future__ import annotations
 import json, sqlite3, sys, threading
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -178,22 +178,29 @@ class App(tk.Tk):
     def _build_words(self):
         frame=ttk.Frame(self.word_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"我的单词本","Title.TLabel").pack(anchor="w");self.word_search=tk.StringVar();entry=ttk.Entry(frame,textvariable=self.word_search);entry.pack(fill="x",pady=8);entry.bind("<KeyRelease>",lambda e:self.refresh_words());self.word_tree=ttk.Treeview(frame,columns=("meaning","mastery","scenes"),show="headings");
         for c,n in [("meaning","单词与释义"),("mastery","熟悉程度"),("scenes","场景")]:self.word_tree.heading(c,text=n)
-        self.word_tree.pack(fill="both",expand=True);self.word_tree.bind("<Double-1>",lambda e:self.word_detail());bar=ttk.Frame(frame);bar.pack(fill="x",pady=8);ttk.Button(bar,text="查看详情",command=self.word_detail).pack(side="left");ttk.Button(bar,text="标记熟悉",command=lambda:self.set_mastery(1)).pack(side="left",padx=6);ttk.Button(bar,text="标记已掌握",command=lambda:self.set_mastery(2)).pack(side="left")
+        self.word_tree.pack(fill="both",expand=True);self.word_tree.bind("<Double-1>",lambda e:self.word_detail());bar=ttk.Frame(frame);bar.pack(fill="x",pady=8);ttk.Button(bar,text="查看详情",command=self.word_detail).pack(side="left");ttk.Button(bar,text="学完，加入记忆曲线",command=self.start_learning).pack(side="left",padx=6);ttk.Button(bar,text="标记熟悉",command=lambda:self.set_mastery(1)).pack(side="left");ttk.Button(bar,text="标记已掌握",command=lambda:self.set_mastery(2)).pack(side="left",padx=6)
     def refresh_words(self):
         self.word_tree.delete(*self.word_tree.get_children());q=self.word_search.get().lower() if hasattr(self,"word_search") else ""
-        for r in self.db.execute("SELECT word,content,mastery FROM words ORDER BY word"):
+        for r in self.db.execute("SELECT word,content,mastery,learned_at FROM words ORDER BY word"):
             content=json.loads(r["content"]);scenes="、".join(x[0] for x in self.db.execute("SELECT s.name FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(r["word"],)));line=f"{r['word']} — {content.get('meaning','')}"
             if q not in (line+scenes).lower():continue
-            self.word_tree.insert("","end",iid=r["word"],values=(line,["学习中","熟悉","已掌握"][r["mastery"]],scenes))
+            state="未学习" if not r["learned_at"] else ["复习中","熟悉","已掌握"][r["mastery"]]
+            self.word_tree.insert("","end",iid=r["word"],values=(line,state,scenes))
     def selected_word(self):return self.word_tree.focus()
     def set_mastery(self,value):
         word=self.selected_word();
         if word:
-            self.db.execute("UPDATE words SET mastery=? WHERE word=?",(value,word));self.db.commit();self.refresh_words()
+            row=self.db.execute("SELECT learned_at FROM words WHERE word=?",(word,)).fetchone()
+            self.db.execute("UPDATE words SET mastery=?,learned_at=COALESCE(learned_at,?),due=CASE WHEN learned_at IS NULL THEN ? ELSE due END,stage=CASE WHEN learned_at IS NULL THEN 0 ELSE stage END WHERE word=?",(value,__import__('datetime').datetime.now().isoformat(),(date.today()+timedelta(days=1)).isoformat(),word));self.db.commit();self.refresh_words()
             if value==2:
                 row=self.db.execute("SELECT word FROM words WHERE mastery<2 AND word<>? ORDER BY CASE WHEN word>? THEN 0 ELSE 1 END,word LIMIT 1",(word,word)).fetchone()
                 if row:self.word_tree.selection_set(row[0]);self.word_tree.focus(row[0]);self.word_tree.see(row[0]);self.word_detail()
                 else:messagebox.showinfo("全部掌握","所有单词都已标记为掌握")
+    def start_learning(self):
+        word=self.selected_word()
+        if not word:return
+        with self.db:self.db.execute("UPDATE words SET learned_at=?,stage=0,due=? WHERE word=? AND learned_at IS NULL",(__import__('datetime').datetime.now().isoformat(),(date.today()+timedelta(days=1)).isoformat(),word))
+        self.refresh_words();messagebox.showinfo("已加入记忆曲线","明天开始第一次复习。")
     def word_detail(self):
         word=self.selected_word();
         if not word:return
@@ -202,24 +209,27 @@ class App(tk.Tk):
         messagebox.showinfo("词卡详情","\n".join(lines))
 
     def _build_review(self):
-        frame=ttk.Frame(self.review_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"今天复习","Title.TLabel").pack(anchor="w");self.review_text=tk.Text(frame,wrap="word",font=("Microsoft YaHei UI",12),state="disabled");self.review_text.pack(fill="both",expand=True,pady=10);self.review_answer=tk.StringVar();ttk.Entry(frame,textvariable=self.review_answer,font=("Microsoft YaHei UI",12)).pack(fill="x",pady=(0,8));bar=ttk.Frame(frame);bar.pack();ttk.Button(bar,text="提交手工答案",command=self.reveal_review).pack(side="left");self.rating_buttons=[]
-        for n,r in [("不认识",3),("有点模糊",2),("认识",1)]:button=ttk.Button(bar,text=n,command=lambda x=r:self.rate_review(x),state="disabled");button.pack(side="left",padx=4);self.rating_buttons.append(button)
+        frame=ttk.Frame(self.review_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"今天复习","Title.TLabel").pack(anchor="w");self.review_text=tk.Text(frame,wrap="word",font=("Microsoft YaHei UI",12),state="disabled");self.review_text.pack(fill="both",expand=True,pady=10);self.review_answer=tk.StringVar();ttk.Entry(frame,textvariable=self.review_answer,font=("Microsoft YaHei UI",12)).pack(fill="x",pady=(0,8));bar=ttk.Frame(frame);bar.pack();self.review_submit=ttk.Button(bar,text="提交给 AI 评判",command=self.reveal_review);self.review_submit.pack(side="left");self.review_next=ttk.Button(bar,text="继续下一个乱序复习",command=self.refresh_review,state="disabled");self.review_next.pack(side="left",padx=8)
     def refresh_review(self):
-        self.review_row=self.db.execute("SELECT * FROM words WHERE due<=? ORDER BY due,word LIMIT 1",(date.today().isoformat(),)).fetchone();self.review_submitted=False;self.review_answer.set("")
-        for button in self.rating_buttons:button.configure(state="disabled")
+        self.review_row=self.db.execute("SELECT * FROM words WHERE learned_at IS NOT NULL AND due<=? ORDER BY RANDOM() LIMIT 1",(date.today().isoformat(),)).fetchone();self.review_answer.set("");self.review_next.configure(state="disabled");self.review_submit.configure(state="normal")
         if self.review_row:
-            content=json.loads(self.review_row["content"]);self._set_review((content.get("quiz") or self.review_row["word"])+"\n\n请手工输入答案，提交后查看参考答案。")
-        else:self._set_review("今天的复习完成了。")
+            self.review_question=f"请不用照抄词卡，用自己的话解释 “{self.review_row['word']}” 的核心含义，并写一个自然的英文例句。";self._set_review(self.review_question+"\n\n可以用中文解释；提交后由 AI 评判并自动安排下次复习。")
+        else:self._set_review("今天没有到期复习。只有学完并加入记忆曲线的单词才会出现在这里。")
     def _set_review(self,s):self.review_text.configure(state="normal");self.review_text.delete("1.0","end");self.review_text.insert("1.0",s);self.review_text.configure(state="disabled")
     def reveal_review(self):
         if not self.review_row:return
         typed=self.review_answer.get().strip()
         if not typed:return messagebox.showinfo("请输入答案","提交前需要手工输入答案")
-        word=self.review_row["word"];content=json.loads(self.review_row["content"]);scenes="\n".join("• "+x[0]+" — "+x[1] for x in self.db.execute("SELECT s.name,sw.reason FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(word,)));links="\n".join("• "+x[0]+" — "+x[1]+"\n  "+x[2] for x in self.db.execute("SELECT old_word,reason,example FROM word_links WHERE new_word=?",(word,)));self._set_review(f"你的答案\n{typed}\n\n参考答案\n{content.get('answer') or word}\n\n{word} — {content.get('meaning','')}\n{content.get('example','')}\n{content.get('translation','')}\n\n场景\n{scenes or '暂无'}\n\n关联旧词\n{links or '暂无合理关联'}");self.review_submitted=True
-        for button in self.rating_buttons:button.configure(state="normal")
-    def rate_review(self,rating):
-        if not self.review_row or not self.review_submitted:return messagebox.showinfo("先提交答案","需要先手工输入并提交答案")
-        stage,due=core.schedule(self.review_row["stage"],rating,date.today());mastery=max(self.review_row["mastery"],1 if rating==1 else 0);self.db.execute("UPDATE words SET stage=?,due=?,mastery=? WHERE word=?",(stage,due,mastery,self.review_row["word"]));self.db.commit();self.refresh_review();self.refresh_words()
+        p=self.active_profile();key=self.keys.get(p["name"],"") if p else ""
+        if not p or not key:self.tabs.select(self.api_tab);return messagebox.showinfo("需要 API 密钥","开放式回答需要 AI 评判，请先设置 API 密钥。")
+        row=dict(self.review_row);content=json.loads(row["content"]);question=self.review_question
+        def work():
+            raw=core.request_review_raw(p["base"],p["model"],p["protocol"],key,content,question,typed);result=core.parse_review_evaluation(raw,p["protocol"]);stage,due=core.schedule(row["stage"],result["rating"],date.today());mastery=max(row["mastery"],2 if result["rating"]==1 and stage>=4 else 1 if result["rating"]==1 else 0);safe=raw.replace(key,"***")
+            with self.db:self.db.execute("UPDATE words SET stage=?,due=?,mastery=? WHERE word=? AND stage=? AND due=?",(stage,due,mastery,row["word"],row["stage"],row["due"]));core.save_review_attempt(self.db,row["word"],question,typed,result,safe)
+            return result,due,safe,content,row
+        self.async_run(work,lambda value:self.review_judged(typed,*value))
+    def review_judged(self,typed,result,due,raw,content,row):
+        self._set_review(f"AI 评判：{result['verdict']}\n下次复习：{due}\n\n你的回答\n{typed}\n\n具体反馈\n{result['feedback']}\n\n清晰解释\n{result['explanation']}\n\n示范回答\n{result['suggested_answer']}\n\n{row['word']} — {content.get('meaning','')}\n{content.get('explanation','')}\n\nAI 原始返回（已脱敏）\n{raw}");self.review_submit.configure(state="disabled");self.review_next.configure(state="normal");self.refresh_words()
 
     def _build_api(self):
         frame=ttk.Frame(self.api_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"API 设置","Title.TLabel").grid(row=0,column=0,columnspan=2,sticky="w");self.label(frame,"验证成功后使用 Windows DPAPI 加密保存密钥。页面和错误不会显示完整密钥。","Sub.TLabel").grid(row=1,column=0,columnspan=2,sticky="w",pady=(0,12));self.api_vars={}

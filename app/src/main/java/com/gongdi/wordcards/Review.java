@@ -7,10 +7,11 @@ public final class Review {
         return word;
     }
     public static String[] next(int stage, int rating, LocalDate today) {
-        if (stage < 0 || stage > 4 || rating < 1 || rating > 3) throw new IllegalArgumentException("复习数据无效。");
-        int days = 1;
-        if (rating == 1) { days = new int[]{1,3,7,14,30}[stage]; stage = Math.min(4, stage+1); }
-        if (rating == 3) stage = 0;
+        if (stage < 0 || stage > 7 || rating < 1 || rating > 3) throw new IllegalArgumentException("复习数据无效。");
+        int[] intervals={1,2,4,7,15,30,60,120};int days=1;
+        if (rating == 1) { days=intervals[stage];stage=Math.min(7,stage+1); }
+        else if(rating==2)stage=Math.max(0,stage-1);
+        else stage=0;
         return new String[]{Integer.toString(stage), today.plusDays(days).toString()};
     }
 }

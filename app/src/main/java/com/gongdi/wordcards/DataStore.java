@@ -19,6 +19,7 @@ public final class DataStore {
             db.execSQL("CREATE TABLE IF NOT EXISTS words(word TEXT PRIMARY KEY,content TEXT NOT NULL,stage INTEGER NOT NULL DEFAULT 0,due TEXT NOT NULL)");
             addColumn("words", "mastery", "INTEGER NOT NULL DEFAULT 0");
             addColumn("words", "created_batch", "INTEGER");
+            addColumn("words", "learned_at", "TEXT");
             db.execSQL("CREATE TABLE IF NOT EXISTS import_batches(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,status TEXT NOT NULL,source TEXT NOT NULL,raw_count INTEGER NOT NULL DEFAULT 0,confirmed_at TEXT)");
             db.execSQL("CREATE TABLE IF NOT EXISTS import_items(id INTEGER PRIMARY KEY AUTOINCREMENT,batch_id INTEGER NOT NULL,word TEXT NOT NULL,meaning TEXT NOT NULL DEFAULT '',state TEXT NOT NULL DEFAULT 'valid',error TEXT NOT NULL DEFAULT '',UNIQUE(batch_id,word))");
             db.execSQL("CREATE TABLE IF NOT EXISTS scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,batch_id INTEGER NOT NULL,name TEXT NOT NULL,position INTEGER NOT NULL DEFAULT 0,user_modified INTEGER NOT NULL DEFAULT 0)");
@@ -27,11 +28,14 @@ public final class DataStore {
             db.execSQL("CREATE TABLE IF NOT EXISTS word_links(id INTEGER PRIMARY KEY AUTOINCREMENT,batch_id INTEGER NOT NULL,new_word TEXT NOT NULL,old_word TEXT NOT NULL,relation TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL,example TEXT NOT NULL DEFAULT '',UNIQUE(batch_id,new_word,old_word))");
             db.execSQL("CREATE TABLE IF NOT EXISTS classification_chunks(batch_id INTEGER NOT NULL,chunk_index INTEGER NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(batch_id,chunk_index))");
             db.execSQL("CREATE TABLE IF NOT EXISTS api_debug_responses(id INTEGER PRIMARY KEY AUTOINCREMENT,batch_id INTEGER NOT NULL,chunk_index INTEGER NOT NULL,status TEXT NOT NULL,received_at TEXT NOT NULL,content TEXT NOT NULL)");
+            db.execSQL("CREATE TABLE IF NOT EXISTS review_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT,word TEXT NOT NULL,question TEXT NOT NULL,answer TEXT NOT NULL,rating INTEGER NOT NULL,verdict TEXT NOT NULL,feedback TEXT NOT NULL,explanation TEXT NOT NULL,raw_response TEXT NOT NULL,created_at TEXT NOT NULL)");
+            db.execSQL("UPDATE words SET learned_at=? WHERE learned_at IS NULL AND (stage>0 OR mastery>0)",new Object[]{LocalDateTime.now().toString()});
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_batches_status ON import_batches(status,id)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_scene_words_word ON scene_words(word)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_links_new_word ON word_links(new_word)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_api_debug_batch ON api_debug_responses(batch_id,id)");
-            db.setVersion(4); db.setTransactionSuccessful();
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_review_attempts_word ON review_attempts(word,id)");
+            db.setVersion(5); db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
     }
     private void addColumn(String table, String column, String definition) {
@@ -65,6 +69,7 @@ public final class DataStore {
     public void saveDebugResponse(long batchId,int chunk,String status,String content){ContentValues v=new ContentValues();v.put("batch_id",batchId);v.put("chunk_index",chunk);v.put("status",status);v.put("received_at",LocalDateTime.now().toString());v.put("content",content);db.insertOrThrow("api_debug_responses",null,v);}
     public JSONArray debugResponses(long batchId)throws Exception{JSONArray out=new JSONArray();try(Cursor c=db.rawQuery("SELECT chunk_index,status,received_at,content FROM api_debug_responses WHERE batch_id=? ORDER BY id DESC",new String[]{Long.toString(batchId)})){while(c.moveToNext())out.put(new JSONObject().put("chunk",c.getInt(0)).put("status",c.getString(1)).put("received_at",c.getString(2)).put("content",c.getString(3)));}return out;}
     public int sanitizeLinks(JSONObject result,JSONArray chunk,JSONArray wholeBatch)throws Exception{java.util.HashSet<String> newWords=new java.util.HashSet<>(),excluded=new java.util.HashSet<>();for(int i=0;i<chunk.length();i++)newWords.add(chunk.getJSONObject(i).getString("word"));for(int i=0;i<wholeBatch.length();i++)excluded.add(wholeBatch.getJSONObject(i).getString("word"));JSONArray source=result.getJSONArray("links"),valid=new JSONArray();int dropped=0;for(int i=0;i<source.length();i++){JSONObject link=source.getJSONObject(i);String n=link.optString("new_word"),old=link.optString("old_word");if(newWords.contains(n)&&!excluded.contains(old)&&wordExists(old)&&!link.optString("reason").trim().isEmpty())valid.put(link);else dropped++;}result.put("links",valid);return dropped;}
+    public void saveReviewAttempt(String word,String question,String answer,JSONObject result,String raw){ContentValues v=new ContentValues();v.put("word",word);v.put("question",question);v.put("answer",answer);v.put("rating",result.optInt("rating",3));v.put("verdict",result.optString("verdict"));v.put("feedback",result.optString("feedback"));v.put("explanation",result.optString("explanation"));v.put("raw_response",raw);v.put("created_at",LocalDateTime.now().toString());db.insertOrThrow("review_attempts",null,v);}
 
     public void saveClassification(long batchId, JSONObject result) throws Exception {
         validate(result, batchItems(batchId));

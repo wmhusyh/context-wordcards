@@ -29,8 +29,8 @@ class CoreTests(unittest.TestCase):
             db.execute("CREATE TABLE words(word TEXT PRIMARY KEY,content TEXT NOT NULL,source TEXT NOT NULL,stage INTEGER NOT NULL,due TEXT NOT NULL)")
             db.execute("INSERT INTO words VALUES(?,?,?,?,?)",("legacy",json.dumps({"meaning":"旧词"}),"api",3,"2030-01-02"));db.commit();db.close()
             migrated=core.connect(path);row=migrated.execute("SELECT * FROM words WHERE word='legacy'").fetchone()
-            self.assertEqual((row["stage"],row["due"],row["mastery"]),(3,"2030-01-02",0))
-            for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links","classification_chunks","api_debug_responses"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
+            self.assertEqual((row["stage"],row["due"],row["mastery"]),(3,"2030-01-02",0));self.assertIsNotNone(row["learned_at"])
+            for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links","classification_chunks","api_debug_responses","review_attempts"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
             migrated.close()
 
     def test_classification_and_links_are_persistent_and_adjustable(self):
@@ -48,6 +48,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM import_batches WHERE id=?",(batch,)).fetchone()[0],"draft")
             self.assertEqual(db.execute("SELECT count(*) FROM scene_words WHERE word='passport'").fetchone()[0],2)
             self.assertEqual(db.execute("SELECT old_word FROM word_links WHERE new_word='passport'").fetchone()[0],"travel")
+            self.assertIsNone(db.execute("SELECT learned_at FROM words WHERE word='passport'").fetchone()[0])
             with db:
                 db.execute("UPDATE scenes SET name='机场手续',user_modified=1 WHERE name='机场值机'")
                 db.execute("UPDATE import_batches SET status='confirmed' WHERE id=?",(batch,))
@@ -70,7 +71,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.endpoint("https://api.example.com/v1/","responses"),"https://api.example.com/v1/responses")
         self.assertEqual(core.endpoint("https://api.example.com/v1/responses","chat"),"https://api.example.com/v1/chat/completions")
         with self.assertRaises(ValueError):core.endpoint("http://example.com/v1","chat")
-        self.assertEqual(core.schedule(0,1,date(2026,12,31)),(1,"2027-01-01"))
+        self.assertEqual(core.schedule(0,1,date(2026,12,31)),(1,"2027-01-01"));self.assertEqual(core.schedule(7,1,date(2026,12,31)),(7,"2027-04-30"));self.assertEqual(core.schedule(3,2,date(2026,12,31)),(2,"2027-01-01"))
         secret="test-key-for-local-roundtrip";self.assertEqual(core.unprotect(core.protect(secret)),secret)
 
     def test_responses_verification_accepts_token_limited_result(self):
@@ -98,5 +99,13 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(core.sanitize_links(db,result,chunk,whole),2);self.assertEqual(result["links"][0]["old_word"],"travel")
             core.save_debug_response(db,9,0,"有效，已忽略 2 条无效关联",'{"ok":true}')
             logs=core.debug_responses(db,9);self.assertEqual((logs[0]["status"],logs[0]["content"]),("有效，已忽略 2 条无效关联",'{"ok":true}'));db.close()
+
+    def test_review_evaluation_parsing_and_history(self):
+        result={"rating":2,"verdict":"部分正确","feedback":"词义正确，例句搭配需修改","explanation":"表示办理登记手续。","suggested_answer":"Check in means to register. I check in at the hotel."}
+        envelope=json.dumps({"choices":[{"finish_reason":"stop","message":{"content":json.dumps(result,ensure_ascii=False)}}]},ensure_ascii=False)
+        self.assertEqual(core.parse_review_evaluation(envelope,"chat")["rating"],2)
+        with tempfile.TemporaryDirectory() as folder:
+            db=core.connect(Path(folder)/"words.db");core.save_review_attempt(db,"check in","question","answer",result,envelope)
+            row=db.execute("SELECT rating,verdict FROM review_attempts WHERE word='check in'").fetchone();self.assertEqual(tuple(row),(2,"部分正确"));db.close()
 
 if __name__=="__main__":unittest.main(verbosity=2)
