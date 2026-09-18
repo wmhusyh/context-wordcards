@@ -34,13 +34,14 @@ public final class DataStore {
             addColumn("scene_summaries","raw_response","TEXT NOT NULL DEFAULT ''");
             db.execSQL("CREATE TABLE IF NOT EXISTS memory_chat(id INTEGER PRIMARY KEY AUTOINCREMENT,word TEXT NOT NULL,question TEXT NOT NULL,answer TEXT NOT NULL,result TEXT NOT NULL,raw_response TEXT NOT NULL,created_at TEXT NOT NULL)");
             db.execSQL("UPDATE words SET learned_at=? WHERE learned_at IS NULL AND (stage>0 OR mastery>0)",new Object[]{LocalDateTime.now().toString()});
+            db.execSQL("UPDATE words SET mastery=1 WHERE mastery>1");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_batches_status ON import_batches(status,id)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_scene_words_word ON scene_words(word)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_links_new_word ON word_links(new_word)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_api_debug_batch ON api_debug_responses(batch_id,id)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_review_attempts_word ON review_attempts(word,id)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_memory_chat_word ON memory_chat(word,id)");
-            db.setVersion(6); db.setTransactionSuccessful();
+            db.setVersion(7); db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
     }
     private void addColumn(String table, String column, String definition) {

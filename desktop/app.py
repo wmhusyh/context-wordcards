@@ -186,41 +186,47 @@ class App(tk.Tk):
         if self.batch:self.classify(self.batch,True)
 
     def _build_words(self):
-        frame=ttk.Frame(self.word_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"我的单词本","Title.TLabel").pack(anchor="w");self.word_search=tk.StringVar();entry=ttk.Entry(frame,textvariable=self.word_search);entry.pack(fill="x",pady=8);entry.bind("<KeyRelease>",lambda e:self.refresh_words());self.word_tree=ttk.Treeview(frame,columns=("meaning","mastery","scenes"),show="headings");
-        for c,n in [("meaning","单词与释义"),("mastery","熟悉程度"),("scenes","场景")]:self.word_tree.heading(c,text=n)
-        self.word_tree.pack(fill="both",expand=True);self.word_tree.bind("<Double-1>",lambda e:self.word_detail());bar=ttk.Frame(frame);bar.pack(fill="x",pady=8);ttk.Button(bar,text="查看详情",command=self.word_detail).pack(side="left");ttk.Button(bar,text="和 AI 互动检查记忆",command=self.memory_coach).pack(side="left",padx=6);ttk.Button(bar,text="学完，加入记忆曲线",command=self.start_learning).pack(side="left");ttk.Button(bar,text="标记熟悉",command=lambda:self.set_mastery(1)).pack(side="left",padx=6);ttk.Button(bar,text="标记已掌握",command=lambda:self.set_mastery(2)).pack(side="left")
+        frame=ttk.Frame(self.word_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"学习","Title.TLabel").pack(anchor="w");self.label(frame,"点“开始学习”按顺序学习，也可以点小按钮自由查看任意单词。","Sub.TLabel").pack(anchor="w")
+        ttk.Button(frame,text="开始学习",command=self.start_learning_sequence).pack(anchor="w",pady=(10,4));self.word_search=tk.StringVar();entry=ttk.Entry(frame,textvariable=self.word_search);entry.pack(fill="x",pady=8);entry.bind("<KeyRelease>",lambda e:self.refresh_words())
+        holder=ttk.Frame(frame);holder.pack(fill="both",expand=True);self.word_canvas=tk.Canvas(holder,highlightthickness=0);scroll=ttk.Scrollbar(holder,orient="vertical",command=self.word_canvas.yview);self.word_canvas.configure(yscrollcommand=scroll.set);self.word_canvas.pack(side="left",fill="both",expand=True);scroll.pack(side="right",fill="y")
+        self.word_grid=ttk.Frame(self.word_canvas);self.word_window=self.word_canvas.create_window((0,0),window=self.word_grid,anchor="nw");self.word_grid.bind("<Configure>",lambda e:self.word_canvas.configure(scrollregion=self.word_canvas.bbox("all")));self.word_canvas.bind("<Configure>",lambda e:self.word_canvas.itemconfigure(self.word_window,width=e.width));self.current_word=""
+
     def refresh_words(self):
-        self.word_tree.delete(*self.word_tree.get_children());q=self.word_search.get().lower() if hasattr(self,"word_search") else ""
-        for r in self.db.execute("SELECT word,content,mastery,learned_at FROM words ORDER BY word"):
-            content=json.loads(r["content"]);scenes="、".join(x[0] for x in self.db.execute("SELECT s.name FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(r["word"],)));line=f"{r['word']} — {content.get('meaning','')}"
-            if q not in (line+scenes).lower():continue
-            state="未学习" if not r["learned_at"] else ["复习中","熟悉","已掌握"][r["mastery"]]
-            self.word_tree.insert("","end",iid=r["word"],values=(line,state,scenes))
-    def selected_word(self):return self.word_tree.focus()
-    def set_mastery(self,value):
-        word=self.selected_word();
-        if word:
-            row=self.db.execute("SELECT learned_at FROM words WHERE word=?",(word,)).fetchone()
-            self.db.execute("UPDATE words SET mastery=?,learned_at=COALESCE(learned_at,?),due=CASE WHEN learned_at IS NULL THEN ? ELSE due END,stage=CASE WHEN learned_at IS NULL THEN 0 ELSE stage END WHERE word=?",(value,__import__('datetime').datetime.now().isoformat(),(date.today()+timedelta(days=1)).isoformat(),word));self.db.commit();self.refresh_words()
-            if value==2:
-                row=self.db.execute("SELECT word FROM words WHERE mastery<2 AND word<>? ORDER BY CASE WHEN word>? THEN 0 ELSE 1 END,word LIMIT 1",(word,word)).fetchone()
-                if row:self.word_tree.selection_set(row[0]);self.word_tree.focus(row[0]);self.word_tree.see(row[0]);self.word_detail()
-                else:messagebox.showinfo("全部掌握","所有单词都已标记为掌握")
-    def start_learning(self):
-        word=self.selected_word()
+        if not hasattr(self,"word_grid"):return
+        for child in self.word_grid.winfo_children():child.destroy()
+        q=self.word_search.get().lower() if hasattr(self,"word_search") else "";shown=0
+        for r in self.db.execute("SELECT word,content FROM words ORDER BY word"):
+            content=json.loads(r["content"]);scenes="、".join(x[0] for x in self.db.execute("SELECT s.name FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(r["word"],)))
+            if q not in (r["word"]+content.get("meaning","")+scenes).lower():continue
+            word=r["word"];ttk.Button(self.word_grid,text=word,width=14,command=lambda w=word:self.open_word(w)).grid(row=shown//5,column=shown%5,padx=4,pady=4,sticky="ew");shown+=1
+        for column in range(5):self.word_grid.columnconfigure(column,weight=1)
+        if shown==0:self.label(self.word_grid,"还没有单词。" if not q else "没有匹配结果。","Sub.TLabel").grid(row=0,column=0,columnspan=5,sticky="w",pady=12)
+
+    def selected_word(self):return self.current_word
+    def open_word(self,word):self.current_word=word;self.word_detail(word)
+    def start_learning_sequence(self):
+        row=self.db.execute("SELECT word FROM words WHERE mastery<1 ORDER BY CASE WHEN learned_at IS NULL THEN 0 ELSE 1 END,word LIMIT 1").fetchone()
+        if row:self.open_word(row[0])
+        else:messagebox.showinfo("学习完成","还没有单词，请先导入。" if not self.db.execute("SELECT 1 FROM words LIMIT 1").fetchone() else "所有单词都已熟悉。")
+
+    def mark_familiar_next(self,word,window=None):
+        with self.db:self.db.execute("UPDATE words SET mastery=1,learned_at=COALESCE(learned_at,?),stage=CASE WHEN learned_at IS NULL THEN 0 ELSE stage END,due=CASE WHEN learned_at IS NULL THEN ? ELSE due END WHERE word=?",(__import__('datetime').datetime.now().isoformat(),(date.today()+timedelta(days=1)).isoformat(),word))
+        if window and window.winfo_exists():window.destroy()
+        self.refresh_words();row=self.db.execute("SELECT word FROM words WHERE mastery<1 AND word<>? ORDER BY CASE WHEN word>? THEN 0 ELSE 1 END,word LIMIT 1",(word,word)).fetchone()
+        if row:self.open_word(row[0])
+        else:messagebox.showinfo("学习完成","所有单词都已熟悉，并已加入记忆曲线。")
+
+    def word_detail(self,word=None):
+        word=word or self.selected_word()
         if not word:return
-        with self.db:self.db.execute("UPDATE words SET learned_at=?,stage=0,due=? WHERE word=? AND learned_at IS NULL",(__import__('datetime').datetime.now().isoformat(),(date.today()+timedelta(days=1)).isoformat(),word))
-        self.refresh_words();messagebox.showinfo("已加入记忆曲线","明天开始第一次复习。")
-    def word_detail(self):
-        word=self.selected_word();
-        if not word:return
-        r=self.db.execute("SELECT content FROM words WHERE word=?",(word,)).fetchone();content=json.loads(r[0]);scenes=list(self.db.execute("SELECT s.name,sw.reason FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(word,)));links=list(self.db.execute("SELECT old_word,relation,reason,example FROM word_links WHERE new_word=?",(word,)))
+        self.current_word=word;r=self.db.execute("SELECT content FROM words WHERE word=?",(word,)).fetchone();content=json.loads(r[0]);scenes=list(self.db.execute("SELECT s.name,sw.reason FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(word,)));links=list(self.db.execute("SELECT old_word,relation,reason,example FROM word_links WHERE new_word=?",(word,)))
         lines=[word,content.get("meaning","")]+[f"{k}: {content.get(k,'')}" for k in core.FIELDS[1:] if content.get(k)]+["","所属场景:"]+[f"• {x['name']} — {x['reason']}" for x in scenes]+["","关联旧词:"]+[f"• {x['old_word']} / {x['relation']}\n  {x['reason']}\n  {x['example']}" for x in links]
-        messagebox.showinfo("词卡详情","\n".join(lines))
-    def memory_coach(self):
-        word=self.selected_word()
-        if not word:return messagebox.showinfo("请选择单词","先在单词本选择一个单词")
-        self.memory_word=word;self.memory_win=tk.Toplevel(self);self.memory_win.title("AI 互动检查 · "+word);self.memory_win.geometry("780x650");self.memory_output=tk.Text(self.memory_win,wrap="word",font=("Microsoft YaHei UI",11),state="disabled");self.memory_output.pack(fill="both",expand=True,padx=14,pady=14);self.memory_answer=tk.StringVar();ttk.Entry(self.memory_win,textvariable=self.memory_answer,font=("Microsoft YaHei UI",11)).pack(fill="x",padx=14);bar=ttk.Frame(self.memory_win);bar.pack(fill="x",padx=14,pady=12);ttk.Button(bar,text="发送给 AI",command=self.send_memory_answer).pack(side="left");self.memory_familiar=ttk.Button(bar,text="AI 判断已记住：标记熟悉",command=lambda:self.mark_memory_familiar(word),state="disabled");self.memory_familiar.pack(side="left",padx=8);self.render_memory_coach()
+        win=tk.Toplevel(self);win.title("词卡 · "+word);win.geometry("720x620");output=tk.Text(win,wrap="word",font=("Microsoft YaHei UI",11));output.insert("1.0","\n".join(lines));output.configure(state="disabled");output.pack(fill="both",expand=True,padx=14,pady=14);bar=ttk.Frame(win);bar.pack(fill="x",padx=14,pady=(0,12));ttk.Button(bar,text="熟悉了，学习下一个",command=lambda:self.mark_familiar_next(word,win)).pack(side="left");ttk.Button(bar,text="和 AI 互动检查记忆",command=lambda:(win.destroy(),self.memory_coach(word))).pack(side="left",padx=8)
+
+    def memory_coach(self,word=None):
+        word=word or self.selected_word()
+        if not word:return messagebox.showinfo("请选择单词","先点一个单词")
+        self.current_word=word;self.memory_word=word;self.memory_win=tk.Toplevel(self);self.memory_win.title("AI 互动检查 · "+word);self.memory_win.geometry("780x650");self.memory_output=tk.Text(self.memory_win,wrap="word",font=("Microsoft YaHei UI",11),state="disabled");self.memory_output.pack(fill="both",expand=True,padx=14,pady=14);self.memory_answer=tk.StringVar();ttk.Entry(self.memory_win,textvariable=self.memory_answer,font=("Microsoft YaHei UI",11)).pack(fill="x",padx=14);bar=ttk.Frame(self.memory_win);bar.pack(fill="x",padx=14,pady=12);ttk.Button(bar,text="发送给 AI",command=self.send_memory_answer).pack(side="left");self.memory_familiar=ttk.Button(bar,text="熟悉了，学习下一个",command=lambda:self.mark_memory_familiar(word),state="disabled");self.memory_familiar.pack(side="left",padx=8);self.render_memory_coach()
     def render_memory_coach(self):
         turns=core.memory_turns(self.db,self.memory_word);last=turns[-1] if turns else None;self.memory_question=(last["result"].get("next_question") if last else f"不用查看词卡，请解释 “{self.memory_word}” 的核心含义，并给出一个自然使用场景。")
         lines=["AI 会从不同角度连续追问，判断你能否主动回忆。",""]
@@ -237,9 +243,7 @@ class App(tk.Tk):
         def work():
             raw=core.request_memory_coach_raw(p["base"],p["model"],p["protocol"],key,card,history,question,answer);result=core.parse_memory_coach(raw,p["protocol"]);core.save_memory_turn(self.db,word,question,answer,result,raw.replace(key,"***"));return result
         self.async_run(work,lambda result:self.render_memory_coach())
-    def mark_memory_familiar(self,word):
-        with self.db:self.db.execute("UPDATE words SET mastery=MAX(mastery,1),learned_at=COALESCE(learned_at,?),stage=CASE WHEN learned_at IS NULL THEN 0 ELSE stage END,due=CASE WHEN learned_at IS NULL THEN ? ELSE due END WHERE word=?",(__import__('datetime').datetime.now().isoformat(),(date.today()+timedelta(days=1)).isoformat(),word))
-        self.refresh_words();messagebox.showinfo("已加入记忆曲线","已标记为熟悉；如果此前未学习，明天开始第一次复习。")
+    def mark_memory_familiar(self,word):self.mark_familiar_next(word,self.memory_win)
 
     def _build_review(self):
         frame=ttk.Frame(self.review_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"今天复习","Title.TLabel").pack(anchor="w");self.review_text=tk.Text(frame,wrap="word",font=("Microsoft YaHei UI",12),state="disabled");self.review_text.pack(fill="both",expand=True,pady=10);self.review_answer=tk.StringVar();ttk.Entry(frame,textvariable=self.review_answer,font=("Microsoft YaHei UI",12)).pack(fill="x",pady=(0,8));bar=ttk.Frame(frame);bar.pack();self.review_submit=ttk.Button(bar,text="提交给 AI 评判",command=self.reveal_review);self.review_submit.pack(side="left");self.review_next=ttk.Button(bar,text="继续下一个乱序复习",command=self.refresh_review,state="disabled");self.review_next.pack(side="left",padx=8)
@@ -257,7 +261,7 @@ class App(tk.Tk):
         if not p or not key:self.tabs.select(self.api_tab);return messagebox.showinfo("需要 API 密钥","开放式回答需要 AI 评判，请先设置 API 密钥。")
         row=dict(self.review_row);content=json.loads(row["content"]);question=self.review_question
         def work():
-            raw=core.request_review_raw(p["base"],p["model"],p["protocol"],key,content,question,typed);result=core.parse_review_evaluation(raw,p["protocol"]);stage,due=core.schedule(row["stage"],result["rating"],date.today());mastery=max(row["mastery"],2 if result["rating"]==1 and stage>=4 else 1 if result["rating"]==1 else 0);safe=raw.replace(key,"***")
+            raw=core.request_review_raw(p["base"],p["model"],p["protocol"],key,content,question,typed);result=core.parse_review_evaluation(raw,p["protocol"]);stage,due=core.schedule(row["stage"],result["rating"],date.today());mastery=max(row["mastery"],1 if result["rating"]==1 else 0);safe=raw.replace(key,"***")
             with self.db:self.db.execute("UPDATE words SET stage=?,due=?,mastery=? WHERE word=? AND stage=? AND due=?",(stage,due,mastery,row["word"],row["stage"],row["due"]));core.save_review_attempt(self.db,row["word"],question,typed,result,safe)
             return result,due,safe,content,row
         self.async_run(work,lambda value:self.review_judged(typed,*value))

@@ -73,6 +73,7 @@ def migrate(db):
         CREATE TABLE IF NOT EXISTS api_profiles(name TEXT PRIMARY KEY,base TEXT NOT NULL,model TEXT NOT NULL,protocol TEXT NOT NULL,is_active INTEGER NOT NULL DEFAULT 0);
         """)
         db.execute("UPDATE words SET learned_at=? WHERE learned_at IS NULL AND (stage>0 OR mastery>0)",(datetime.now().isoformat(),))
+        db.execute("UPDATE words SET mastery=1 WHERE mastery>1")
         if not db.execute("SELECT 1 FROM api_profiles").fetchone(): db.execute("INSERT INTO api_profiles VALUES('默认','https://api.openai.com/v1','gpt-4.1-mini','responses',1)")
 
 def create_batch(db, preview, source):

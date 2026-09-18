@@ -33,6 +33,13 @@ class CoreTests(unittest.TestCase):
             for table in ("import_batches","import_items","scenes","scene_words","unclassified","word_links","classification_chunks","api_debug_responses","review_attempts","scene_summaries","memory_chat"):self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone())
             migrated.close()
 
+    def test_migration_converts_mastered_to_familiar_without_losing_schedule(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"old-state.db";db=core.connect(path)
+            db.execute("INSERT INTO words(word,content,stage,due,mastery,learned_at) VALUES(?,?,?,?,?,?)",("known",json.dumps({"meaning":"知道"}),5,"2030-04-06",2,"2030-01-01T08:00:00"));db.commit();db.close()
+            migrated=core.connect(path);row=migrated.execute("SELECT mastery,stage,due,learned_at FROM words WHERE word='known'").fetchone()
+            self.assertEqual((row["mastery"],row["stage"],row["due"],row["learned_at"]),(1,5,"2030-04-06","2030-01-01T08:00:00"));migrated.close()
+
     def test_classification_and_links_are_persistent_and_adjustable(self):
         with tempfile.TemporaryDirectory() as folder:
             db=core.connect(Path(folder)/"words.db")
