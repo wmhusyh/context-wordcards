@@ -2,6 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import date
 from pathlib import Path
 import sys
@@ -10,6 +11,16 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"desktop"))
 import core
 
 class CoreTests(unittest.TestCase):
+    def test_feedback_prompts_explain_grammar_and_preserve_intent(self):
+        card={"word":"check in","meaning":"办理登记"}
+        with patch.object(core,"_post",return_value="{}") as post:
+            core.request_review_raw("https://api.example.com/v1","model","responses","key",card,"请造句","I check in hotel.")
+            payload=post.call_args.args[1];instructions=payload["instructions"]
+            self.assertIn("原表达为什么不能这样说",instructions);self.assertIn("顺着用户原本想表达的意思",instructions);self.assertEqual(payload["max_output_tokens"],2400)
+            core.request_memory_coach_raw("https://api.example.com/v1","model","responses","key",card,[],"请造句","I check in hotel.")
+            payload=post.call_args.args[1];instructions=payload["instructions"]
+            self.assertIn("语法问题要明确讲出相关规则",instructions);self.assertIn("尽量保留原意",instructions);self.assertEqual(payload["max_output_tokens"],2400)
+
     def test_parser_handles_meanings_duplicates_empty_and_errors(self):
         result=core.parse_import("Airport\npassport: 护照\n\npassport\n错误123\ncheck in\t办理登机")
         self.assertEqual([x["word"] for x in result["items"]],["airport","passport","check in"])
