@@ -41,7 +41,8 @@ public final class DataStore {
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_api_debug_batch ON api_debug_responses(batch_id,id)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_review_attempts_word ON review_attempts(word,id)");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_memory_chat_word ON memory_chat(word,id)");
-            db.setVersion(7); db.setTransactionSuccessful();
+            new NotebookStore(db).migrate();
+            db.setVersion(8); db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
     }
     private void addColumn(String table, String column, String definition) {
@@ -49,10 +50,13 @@ public final class DataStore {
         catch (Exception ignored) { }
     }
 
-    public long createBatch(JSONObject preview, String source) throws Exception {
+    public long createBatch(JSONObject preview, String source) throws Exception { return createBatch(preview,source,1); }
+    public long createBatch(JSONObject preview, String source,long notebookId) throws Exception {
+        if(!new NotebookStore(db).exists(notebookId))throw new IllegalArgumentException("单词本不存在。");
         db.beginTransaction();
         try {
             ContentValues batch = new ContentValues(); batch.put("created_at", LocalDateTime.now().toString()); batch.put("status", "parsed"); batch.put("source", source); batch.put("raw_count", preview.getJSONArray("items").length());
+            batch.put("notebook_id",notebookId);
             long id = db.insertOrThrow("import_batches", null, batch);
             JSONArray items = preview.getJSONArray("items");
             for (int i=0;i<items.length();i++) { JSONObject item=items.getJSONObject(i); ContentValues v=new ContentValues();v.put("batch_id",id);v.put("word",item.getString("word"));v.put("meaning",item.optString("meaning"));v.put("state","valid");db.insertOrThrow("import_items",null,v); }
@@ -88,6 +92,7 @@ public final class DataStore {
         try {
             db.delete("scene_words","scene_id IN (SELECT id FROM scenes WHERE batch_id=?)",new String[]{Long.toString(batchId)});db.delete("scenes","batch_id=?",new String[]{Long.toString(batchId)});db.delete("unclassified","batch_id=?",new String[]{Long.toString(batchId)});db.delete("word_links","batch_id=?",new String[]{Long.toString(batchId)});
             JSONArray cards=result.getJSONArray("cards");for(int i=0;i<cards.length();i++){JSONObject card=cards.getJSONObject(i);String word=card.getString("word");ContentValues v=new ContentValues();v.put("word",word);v.put("content",card.toString());v.put("stage",0);v.put("due",java.time.LocalDate.now().toString());v.put("created_batch",batchId);db.insertWithOnConflict("words",null,v,SQLiteDatabase.CONFLICT_IGNORE);}
+            db.execSQL("INSERT OR IGNORE INTO notebook_words(notebook_id,word) SELECT b.notebook_id,i.word FROM import_batches b JOIN import_items i ON i.batch_id=b.id JOIN words w ON w.word=i.word WHERE b.id=?",new Object[]{batchId});
             JSONArray scenes=result.getJSONArray("scenes");for(int i=0;i<scenes.length();i++){JSONObject scene=scenes.getJSONObject(i);ContentValues sv=new ContentValues();sv.put("batch_id",batchId);sv.put("name",scene.getString("name"));sv.put("position",i);long sceneId=db.insertOrThrow("scenes",null,sv);JSONArray members=scene.getJSONArray("members");for(int j=0;j<members.length();j++){JSONObject member=members.getJSONObject(j);ContentValues mv=new ContentValues();mv.put("scene_id",sceneId);mv.put("word",member.getString("word"));mv.put("reason",member.getString("reason"));db.insertOrThrow("scene_words",null,mv);}}
             JSONArray missing=result.optJSONArray("unclassified");if(missing!=null)for(int i=0;i<missing.length();i++){JSONObject item=missing.getJSONObject(i);ContentValues v=new ContentValues();v.put("batch_id",batchId);v.put("word",item.getString("word"));v.put("reason",item.optString("reason"));db.insertOrThrow("unclassified",null,v);}
             JSONArray links=result.optJSONArray("links");if(links!=null)for(int i=0;i<links.length();i++){JSONObject link=links.getJSONObject(i);ContentValues v=new ContentValues();v.put("batch_id",batchId);v.put("new_word",link.getString("new_word"));v.put("old_word",link.getString("old_word"));v.put("relation",link.optString("relation"));v.put("reason",link.getString("reason"));v.put("example",link.optString("example"));db.insertWithOnConflict("word_links",null,v,SQLiteDatabase.CONFLICT_IGNORE);}

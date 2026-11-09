@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -91,6 +92,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.endpoint("https://api.example.com/v1/responses","chat"),"https://api.example.com/v1/chat/completions")
         with self.assertRaises(ValueError):core.endpoint("http://example.com/v1","chat")
         self.assertEqual(core.schedule(0,1,date(2026,12,31)),(1,"2027-01-01"));self.assertEqual(core.schedule(7,1,date(2026,12,31)),(7,"2027-04-30"));self.assertEqual(core.schedule(3,2,date(2026,12,31)),(2,"2027-01-01"))
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI requires Windows")
+    def test_dpapi_roundtrip(self):
         secret="test-key-for-local-roundtrip";self.assertEqual(core.unprotect(core.protect(secret)),secret)
 
     def test_responses_verification_accepts_token_limited_result(self):

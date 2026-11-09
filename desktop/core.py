@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from urllib.parse import urlparse
+import notebooks
 
 FIELDS = ("meaning","part_of_speech","explanation","example","translation","memory","quiz","answer")
 
@@ -72,14 +73,19 @@ def migrate(db):
         CREATE INDEX IF NOT EXISTS idx_memory_chat_word ON memory_chat(word,id);
         CREATE TABLE IF NOT EXISTS api_profiles(name TEXT PRIMARY KEY,base TEXT NOT NULL,model TEXT NOT NULL,protocol TEXT NOT NULL,is_active INTEGER NOT NULL DEFAULT 0);
         """)
+        if "raw_response" not in {r[1] for r in db.execute("PRAGMA table_info(scene_summaries)")}:
+            db.execute("ALTER TABLE scene_summaries ADD COLUMN raw_response TEXT NOT NULL DEFAULT ''")
+        notebooks.migrate(db)
         db.execute("UPDATE words SET learned_at=? WHERE learned_at IS NULL AND (stage>0 OR mastery>0)",(datetime.now().isoformat(),))
         db.execute("UPDATE words SET mastery=1 WHERE mastery>1")
         if not db.execute("SELECT 1 FROM api_profiles").fetchone(): db.execute("INSERT INTO api_profiles VALUES('默认','https://api.openai.com/v1','gpt-4.1-mini','responses',1)")
 
-def create_batch(db, preview, source):
+def create_batch(db, preview, source, notebook_id=1):
+    notebooks.require(db, notebook_id)
     with db:
         cur=db.execute("INSERT INTO import_batches(created_at,status,source,raw_count) VALUES(?,?,?,?)",(datetime.now().isoformat(),"parsed",source,len(preview["items"])))
         batch=cur.lastrowid
+        db.execute("UPDATE import_batches SET notebook_id=? WHERE id=?", (notebook_id,batch))
         db.executemany("INSERT INTO import_items(batch_id,word,meaning) VALUES(?,?,?)",[(batch,x["word"],x["meaning"]) for x in preview["items"]])
     return batch
 
@@ -297,6 +303,8 @@ def save_classification(db,batch,result):
         db.execute("DELETE FROM scene_words WHERE scene_id IN (SELECT id FROM scenes WHERE batch_id=?)",(batch,));db.execute("DELETE FROM scenes WHERE batch_id=?",(batch,));db.execute("DELETE FROM unclassified WHERE batch_id=?",(batch,));db.execute("DELETE FROM word_links WHERE batch_id=?",(batch,))
         for card in result["cards"]:
             db.execute("INSERT OR IGNORE INTO words(word,content,source,stage,due,created_batch) VALUES(?,?,?,0,?,?)",(card["word"],json.dumps(card,ensure_ascii=False),"ai-batch",date.today().isoformat(),batch))
+        book=db.execute("SELECT notebook_id FROM import_batches WHERE id=?",(batch,)).fetchone()[0]
+        db.executemany("INSERT OR IGNORE INTO notebook_words VALUES(?,?)",[(book,card["word"]) for card in result["cards"]])
         for pos,scene in enumerate(result["scenes"]):
             cur=db.execute("INSERT INTO scenes(batch_id,name,position) VALUES(?,?,?)",(batch,scene["name"],pos));sid=cur.lastrowid
             db.executemany("INSERT INTO scene_words(scene_id,word,reason) VALUES(?,?,?)",[(sid,m["word"],m["reason"]) for m in scene["members"]])

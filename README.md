@@ -34,6 +34,29 @@
 - 多套 OpenAI 兼容 API 配置
 - 兼容旧版 `words` 表和原有学习记录
 
+## 单词本管理（0.7.0）
+
+Android 和 Windows 均支持创建多个单词本，例如“建筑英语300词”“The Giver 生词”“日常工作”。单词本由用户按来源或目标整理，AI 场景分类继续独立保留。
+
+- 应用打开默认进入单词本，可切换“全部单词”或某个本子。
+- 支持新建、重命名、上移、下移和删除；默认单词本保留固定名称且不能删除。
+- 旧词库首次升级时自动收录进默认单词本，词卡和复习进度不变。
+- 一个词可收录进多个本子，词卡、学习状态和复习日期共用，不会重复排期。
+- 每本显示总词数、未学数和到期数。搜索支持单词、释义和场景。
+- “学习当前筛选”只在当前本子及搜索结果内推进；按本复习只抽取本内到期词，底部“复习”仍可复习全部单词。
+- Android 点击“批量整理单词”后勾选；Windows 使用 Ctrl / Shift 多选。支持加入其他本子、从当前本子移除。
+- 移除收录关系或删除本子会保留单词和复习记录；失去全部归属的词自动移入默认单词本。默认本中没有其他归属的词会继续保留。
+- 导入前选择目标本子。已有词直接加入该本子，不重新生成词卡；只有新词调用 AI。未完成批次保存目标本子，重开后继续仍使用原目标；目标本子被删除时转入默认本。
+
+## 完整备份与恢复
+
+两端使用同一版本化 JSON 格式，包含词卡和学习进度、单词本与收录关系、导入批次及分组缓存、场景及人工调整、新旧词关联、复习评判、场景总结、AI 互动记录及已脱敏调试返回。不包含 API 配置和密钥。
+
+- **完整备份恢复会替换当前词库**。恢复前先导出当前备份；页面会明确提示替换并要求确认。
+- 备份先在临时数据库校验，确认格式、词卡、进度和核心关联完整后才写入；写入失败会回滚。
+- 旧版单词数组 JSON 仍可合并导入，同名单词保留当前内容和复习进度。
+- Android 可在单词本页或导入页操作；Windows 在单词本页操作。AI 请求进行中暂不允许备份或恢复。
+
 ## Android 安装
 
 在仓库右侧的 **Releases** 中下载最新版 APK，在 Android 手机上点击安装。最低支持 Android 8.0（API 26）。
@@ -53,8 +76,8 @@ python desktop/app.py
 ## 批量导入流程
 
 1. 粘贴单词文本，或选择 CSV 文件。
-2. 查看预览；已有单词和本批重复项自动跳过，空行忽略，格式问题单独列出。
-3. 确认有效列表，不需要创建或选择场景。
+2. 查看预览；已有单词收录进目标本子且不重新生成，本批重复项自动跳过，空行忽略，格式问题单独列出。
+3. 确认有效列表及目标单词本，不需要创建或选择场景。
 4. AI 对整批单词生成词卡、动态场景、分类理由、无法判断项和旧词关联。
 5. 在分类预览中重命名、移动、合并或拆分。
 6. 确认分类。结果和人工调整立即保存在本地。
@@ -89,7 +112,8 @@ AI 返回的草稿也会保存。超过 30 个词时会拆为多组逐次获取�
 
 | 表 | 用途 |
 | --- | --- |
-| `words` | 原词卡和复习进度；新增 `mastery`、`created_batch` |
+| `words` | 原词卡和共享复习进度；包含 `mastery`、`created_batch`、`learned_at` |
+| `notebooks` / `notebook_words` | 用户自建单词本、排序和多对多收录关系 |
 | `import_batches` | 导入批次及 parsed / draft / confirmed 状态 |
 | `import_items` | 批次中的规范化单词和用户提供的释义 |
 | `scenes` | AI 动态生成或用户调整后的场景 |
@@ -134,6 +158,8 @@ Android 手机直接连接所填写的 API，不会经过电脑。电脑正在�
 app/src/main/java/com/gongdi/wordcards/
 ├── MainActivity.java    # Android 界面与业务流程
 ├── DataStore.java       # 数据迁移和场景/关联持久化
+├── NotebookStore.java   # 单词本、收录关系及范围查询
+├── Backup.java          # 版本化完整备份、校验和恢复
 ├── ImportParser.java    # 粘贴文本与 CSV 解析
 ├── ApiClient.java       # 两种兼容 API、结构化输出及校验
 ├── KeyVault.java        # Android Keystore 加密保存密钥
@@ -142,6 +168,8 @@ app/src/main/java/com/gongdi/wordcards/
 desktop/
 ├── app.py               # Windows Tkinter 桌面界面
 ├── core.py              # 桌面数据、API、迁移和 DPAPI
+├── notebooks.py         # 单词本管理及范围查询
+├── backup.py            # 与 Android 通用的完整备份格式
 └── start_desktop.cmd
 ```
 
@@ -167,3 +195,11 @@ python build_apk.py `
 不要把 API 密钥写入源码、提交记录或 Issue。面向多人公开分发前，仍建议增加服务端代理、账户限额和滥用保护。
 
 结构化输出设计参考 [OpenAI 官方 Structured Outputs 文档](https://developers.openai.com/api/docs/guides/structured-outputs)。
+
+## 开发验证
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Windows DPAPI 往返测试仅在 Windows 上执行。桌面界面测试需要图形显示环境，未设置 `DISPLAY` 的非 Windows 环境会跳过。Android 源码可使用 Platform 35 的 `android.jar` 编译检查；`tests/AndroidCoreTest.java` 是不依赖设备的核心逻辑检查。编译与主机测试不能替代 Android 真机上的升级、文件选择和返回手势检查。

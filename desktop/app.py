@@ -8,6 +8,9 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import core
+import notebooks
+import backup
+import random
 
 ROOT=Path(__file__).resolve().parent
 
@@ -15,13 +18,13 @@ class App(tk.Tk):
     def __init__(self,db_path=None):
         super().__init__();self.title("情境词卡");self.geometry("980x700");self.minsize(760,560)
         legacy=ROOT.parent/"outputs"/"words.db";default_db=legacy if legacy.exists() else ROOT/"context_words.db"
-        self.db=core.connect(Path(db_path or default_db));self.preview=None;self.batch=None;self.busy=False
+        self.db=core.connect(Path(db_path or default_db));self.preview=None;self.batch=None;self.busy=False;self.book_id=0;self.review_book_id=0;self.learning_scope=None
         self.keys_path=ROOT/".api_keys.json";self.keys=self._load_keys()
         style=ttk.Style(self);style.configure("Title.TLabel",font=("Microsoft YaHei UI",22,"bold"));style.configure("Sub.TLabel",foreground="#657470")
         self.tabs=ttk.Notebook(self);self.tabs.pack(fill="both",expand=True,padx=14,pady=14)
         self.import_tab=ttk.Frame(self.tabs);self.scene_tab=ttk.Frame(self.tabs);self.word_tab=ttk.Frame(self.tabs);self.review_tab=ttk.Frame(self.tabs);self.api_tab=ttk.Frame(self.tabs)
         for frame,name in [(self.import_tab,"批量导入"),(self.scene_tab,"场景预览"),(self.word_tab,"单词本"),(self.review_tab,"今天复习"),(self.api_tab,"API 设置")]:self.tabs.add(frame,text=name)
-        self._build_import();self._build_scenes();self._build_words();self._build_review();self._build_api();self.refresh_all();self.protocol("WM_DELETE_WINDOW",self.close)
+        self._build_import();self._build_scenes();self._build_words();self._build_review();self._build_api();self.refresh_all();self.tabs.select(self.word_tab);self.protocol("WM_DELETE_WINDOW",self.close)
 
     def _load_keys(self):
         try:return {k:core.unprotect(v) for k,v in json.loads(self.keys_path.read_text(encoding="utf-8")).items()}
@@ -47,6 +50,9 @@ class App(tk.Tk):
 
     def _build_import(self):
         top=ttk.Frame(self.import_tab,padding=16);top.pack(fill="both",expand=True);self.label(top,"批量导入单词","Title.TLabel").pack(anchor="w");self.label(top,"无需选择场景。粘贴或选择 CSV 后先预览，再由 AI 根据整批关系自动聚类。","Sub.TLabel").pack(anchor="w",pady=(2,12))
+        bookbar=ttk.Frame(top);bookbar.pack(fill="x",pady=(0,8));self.label(bookbar,"导入到单词本").pack(side="left")
+        self.import_book=tk.StringVar();self.import_book_box=ttk.Combobox(bookbar,textvariable=self.import_book,state="readonly");self.import_book_box.pack(side="left",padx=8)
+        ttk.Button(bookbar,text="新建单词本",command=self.create_book).pack(side="left")
         self.raw=tk.Text(top,height=13,font=("Consolas",11),wrap="word");self.raw.pack(fill="both",expand=True);self.raw.insert("1.0","boarding pass: 登机牌\ncheck in\npassport")
         actions=ttk.Frame(top);actions.pack(fill="x",pady=10);ttk.Button(actions,text="预览粘贴内容",command=self.preview_paste).pack(side="left");ttk.Button(actions,text="选择 CSV",command=self.choose_csv).pack(side="left",padx=8);ttk.Button(actions,text="继续未完成批次",command=self.resume_latest).pack(side="left");ttk.Button(actions,text="查看 AI 调试返回",command=self.show_debug_responses).pack(side="left",padx=8)
         self.import_summary=tk.StringVar(value="等待导入");self.label(top,"支持每行一个单词、word: 释义，以及 CSV 的前两列。", "Sub.TLabel").pack(anchor="w");summary=self.label(top,"");summary.configure(textvariable=self.import_summary);summary.pack(anchor="w")
@@ -56,16 +62,31 @@ class App(tk.Tk):
         path=filedialog.askopenfilename(filetypes=[("CSV","*.csv"),("文本","*.txt"),("所有文件","*.*")]);
         if path:self.show_preview(core.parse_import(Path(path).read_text(encoding="utf-8-sig"),True),"csv")
     def show_preview(self,result,source):
-        existing={r[0] for r in self.db.execute("SELECT word FROM words")};kept=[x for x in result["items"] if x["word"] not in existing];old=[x for x in result["items"] if x["word"] in existing];result["items"]=kept;result["existing"]=old;self.preview=(result,source)
-        win=tk.Toplevel(self);win.title("导入预览");win.geometry("720x520");self.label(win,f"可导入 {len(kept)} 个；已有 {len(old)} 个；本批重复 {len(result['duplicates'])} 个；格式问题 {len(result['errors'])} 个；空行 {result['empty_lines']}","Title.TLabel").pack(anchor="w",padx=16,pady=12)
+        existing={r[0] for r in self.db.execute("SELECT word FROM words")};kept=[x for x in result["items"] if x["word"] not in existing];old=[x for x in result["items"] if x["word"] in existing];result["items"]=kept;result["existing"]=old;self.preview=(result,source,self.import_book_id())
+        preview=self.preview
+        win=tk.Toplevel(self);win.title("导入预览");win.geometry("720x520")
+        self.label(win,"导入到："+self.import_book.get(),"Title.TLabel").pack(anchor="w",padx=16,pady=12)
+        self.label(win,f"新词 {len(kept)} · 已有词 {len(old)} · 本批重复 {len(result['duplicates'])} · 格式问题 {len(result['errors'])} · 空行 {result['empty_lines']}").pack(anchor="w",padx=16,pady=(0,8))
         tree=ttk.Treeview(win,columns=("meaning","state"),show="tree headings");tree.heading("#0",text="单词 / 原文");tree.heading("meaning",text="释义");tree.heading("state",text="状态");tree.pack(fill="both",expand=True,padx=16)
         for x in kept:tree.insert("", "end",text=x["word"],values=(x["meaning"],"可导入"))
-        for x in old:tree.insert("", "end",text=x["word"],values=(x["meaning"],"已存在，跳过"))
+        for x in old:tree.insert("", "end",text=x["word"],values=(x["meaning"],"已有词，直接加入所选本子"))
         for x in result["errors"]:tree.insert("", "end",text=x["raw"],values=(x["message"],f"第 {x['line']} 行错误"))
-        bar=ttk.Frame(win);bar.pack(fill="x",padx=16,pady=12);ttk.Button(bar,text="返回修改",command=win.destroy).pack(side="right");ttk.Button(bar,text="确认并让 AI 分类",command=lambda:(win.destroy(),self.start_import())).pack(side="right",padx=8)
-    def start_import(self):
-        if not self.preview or not self.preview[0]["items"]:return messagebox.showwarning("没有新词","没有可导入的新单词")
-        self.batch=core.create_batch(self.db,self.preview[0],self.preview[1]);self.classify(self.batch)
+        bar=ttk.Frame(win);bar.pack(fill="x",padx=16,pady=12);ttk.Button(bar,text="返回修改",command=win.destroy).pack(side="right");ttk.Button(bar,text="确认收录（仅新词调用 AI）",command=lambda:(win.destroy(),self.start_import(preview))).pack(side="right",padx=8)
+    def import_book_id(self):
+        return self.book_name_ids.get(self.import_book.get(),1)
+    def start_import(self,preview=None):
+        preview=preview or self.preview
+        if not preview:return
+        if self.busy:return messagebox.showinfo("请稍候","已有 AI 请求正在执行，请完成后再收录。")
+        result,source,book=preview
+        if not result["items"] and not result["existing"]:return messagebox.showinfo("没有有效单词","请返回修改导入内容")
+        try:
+            notebooks.add(self.db,book,[x["word"] for x in result["existing"]])
+            if result["items"]:
+                self.batch=core.create_batch(self.db,result,source,book);self.classify(self.batch)
+            else:messagebox.showinfo("已收录","已有单词已加入所选本子，复习进度保持不变。")
+            self.refresh_all()
+        except Exception as exc:messagebox.showerror("收录失败",str(exc))
     def resume_latest(self):
         row=self.db.execute("SELECT id,status FROM import_batches WHERE status IN ('parsed','draft') ORDER BY id DESC LIMIT 1").fetchone()
         if not row:return messagebox.showinfo("没有草稿","没有未完成批次")
@@ -186,35 +207,131 @@ class App(tk.Tk):
         if self.batch:self.classify(self.batch,True)
 
     def _build_words(self):
-        frame=ttk.Frame(self.word_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"学习","Title.TLabel").pack(anchor="w");self.label(frame,"点“开始学习”按顺序学习，也可以点小按钮自由查看任意单词。","Sub.TLabel").pack(anchor="w")
-        ttk.Button(frame,text="开始学习",command=self.start_learning_sequence).pack(anchor="w",pady=(10,4));self.word_search=tk.StringVar();entry=ttk.Entry(frame,textvariable=self.word_search);entry.pack(fill="x",pady=8);entry.bind("<KeyRelease>",lambda e:self.refresh_words())
-        holder=ttk.Frame(frame);holder.pack(fill="both",expand=True);self.word_canvas=tk.Canvas(holder,highlightthickness=0);scroll=ttk.Scrollbar(holder,orient="vertical",command=self.word_canvas.yview);self.word_canvas.configure(yscrollcommand=scroll.set);self.word_canvas.pack(side="left",fill="both",expand=True);scroll.pack(side="right",fill="y")
-        self.word_grid=ttk.Frame(self.word_canvas);self.word_window=self.word_canvas.create_window((0,0),window=self.word_grid,anchor="nw");self.word_grid.bind("<Configure>",lambda e:self.word_canvas.configure(scrollregion=self.word_canvas.bbox("all")));self.word_canvas.bind("<Configure>",lambda e:self.word_canvas.itemconfigure(self.word_window,width=e.width));self.current_word=""
+        frame=ttk.Frame(self.word_tab,padding=16);frame.pack(fill="both",expand=True)
+        self.label(frame,"我的单词本","Title.TLabel").pack(anchor="w")
+        self.label(frame,"按来源或目标整理；同一个词在所有本子中共用复习进度。","Sub.TLabel").pack(anchor="w")
+        bar=ttk.Frame(frame);bar.pack(fill="x",pady=8)
+        self.book_choice=tk.StringVar();self.book_box=ttk.Combobox(bar,textvariable=self.book_choice,state="readonly",width=26);self.book_box.pack(side="left")
+        self.book_box.bind("<<ComboboxSelected>>",lambda e:self.select_book())
+        for text,cmd in [("新建",self.create_book),("重命名",self.rename_book),("删除本子",self.delete_book),("上移",lambda:self.move_book(-1)),("下移",lambda:self.move_book(1))]:ttk.Button(bar,text=text,command=cmd).pack(side="left",padx=3)
+        self.book_summary=tk.StringVar();ttk.Label(frame,textvariable=self.book_summary).pack(anchor="w")
+        actions=ttk.Frame(frame);actions.pack(fill="x",pady=8)
+        for text,cmd in [("学习当前筛选",self.start_learning_sequence),("复习本内到期词",self.review_current_book),("批量加入其他本子",lambda:self.edit_memberships(False)),("从本子移除",lambda:self.edit_memberships(True))]:ttk.Button(actions,text=text,command=cmd).pack(side="left",padx=(0,6))
+        self.word_search=tk.StringVar();entry=ttk.Entry(frame,textvariable=self.word_search);entry.pack(fill="x",pady=4);entry.bind("<KeyRelease>",lambda e:self.refresh_words())
+        self.label(frame,"搜索单词、释义或场景；Ctrl / Shift 可多选。","Sub.TLabel").pack(anchor="w")
+        holder=ttk.Frame(frame);holder.pack(fill="both",expand=True)
+        self.word_tree=ttk.Treeview(holder,columns=("meaning","state"),show="tree headings",selectmode="extended")
+        self.word_tree.heading("#0",text="单词");self.word_tree.heading("meaning",text="释义");self.word_tree.heading("state",text="学习状态")
+        self.word_tree.column("#0",width=180);self.word_tree.column("state",width=120)
+        scroll=ttk.Scrollbar(holder,orient="vertical",command=self.word_tree.yview);self.word_tree.configure(yscrollcommand=scroll.set)
+        self.word_tree.pack(side="left",fill="both",expand=True);scroll.pack(side="right",fill="y")
+        self.word_tree.bind("<Double-1>",lambda e:self.open_selected_word());self.word_tree.bind("<Return>",lambda e:self.open_selected_word())
+        bottom=ttk.Frame(frame);bottom.pack(fill="x",pady=(8,0))
+        ttk.Button(bottom,text="打开词卡",command=self.open_selected_word).pack(side="left")
+        ttk.Button(bottom,text="导出完整备份",command=self.export_backup).pack(side="right")
+        ttk.Button(bottom,text="恢复备份",command=self.restore_backup).pack(side="right",padx=8)
+        self.current_word=""
 
+    def refresh_books(self):
+        books=notebooks.stats(self.db);self.book_name_ids={x['name']:x['id'] for x in books};self.book_ids_names={x['id']:x['name'] for x in books}
+        if self.book_id not in self.book_ids_names:self.book_id=0
+        self.book_box.configure(values=['全部单词']+list(self.book_name_ids));self.book_choice.set(self.book_ids_names.get(self.book_id,'全部单词'))
+        old=self.import_book.get();self.import_book_box.configure(values=list(self.book_name_ids));self.import_book.set(old if old in self.book_name_ids else '默认单词本')
+        old_review=self.review_book_id
+        if old_review not in self.book_ids_names:self.review_book_id=0
+        self.review_book_box.configure(values=['全部单词']+list(self.book_name_ids));self.review_book_choice.set(self.book_ids_names.get(self.review_book_id,'全部单词'))
+    def select_book(self):
+        self.book_id=self.book_name_ids.get(self.book_choice.get(),0);self.word_search.set('');self.refresh_words()
+    def create_book(self):
+        if self.busy:return messagebox.showinfo("请稍候","请等当前 AI 请求完成后整理单词本。")
+        name=simpledialog.askstring('新建单词本','名称，例如：建筑英语300词')
+        if name is None:return
+        try:
+            self.book_id=notebooks.create(self.db,name);self.refresh_all();self.import_book.set(self.book_ids_names[self.book_id])
+        except Exception as exc:messagebox.showerror('无法创建',str(exc))
+    def rename_book(self):
+        if self.busy:return messagebox.showinfo("请稍候","请等当前 AI 请求完成后整理单词本。")
+        if self.book_id<=1:return messagebox.showinfo('请选择自建单词本','默认单词本保留固定名称。')
+        name=simpledialog.askstring('重命名','名称',initialvalue=self.book_ids_names[self.book_id])
+        if name is not None:
+            try:notebooks.rename(self.db,self.book_id,name);self.refresh_all()
+            except Exception as exc:messagebox.showerror('无法重命名',str(exc))
+    def delete_book(self):
+        if self.busy:return messagebox.showinfo("请稍候","请等当前 AI 请求完成后整理单词本。")
+        if self.book_id<=1:return messagebox.showinfo('请选择自建单词本','默认单词本不能删除。')
+        if messagebox.askyesno('删除单词本','只删除本子，保留所有单词和复习记录。没有其他归属的词会移入默认单词本。'):
+            notebooks.delete(self.db,self.book_id);self.book_id=0;self.refresh_all()
+    def move_book(self,direction):
+        if self.busy:return messagebox.showinfo("请稍候","请等当前 AI 请求完成后整理单词本。")
+        if self.book_id:notebooks.move(self.db,self.book_id,direction);self.refresh_all()
+    def edit_memberships(self,remove):
+        if self.busy:return messagebox.showinfo("请稍候","请等当前 AI 请求完成后整理单词本。")
+        selected=list(self.word_tree.selection())
+        if not selected:return messagebox.showinfo('请选择单词','先在列表中选择要整理的单词。')
+        if remove:
+            if not self.book_id:return messagebox.showinfo('请选择单词本','先选择一个具体的本子。')
+            if messagebox.askyesno('从本子移除',f'移除 {len(selected)} 个词的收录关系？单词和进度会保留；没有其他归属时回到默认本。'):
+                notebooks.remove(self.db,self.book_id,selected);self.refresh_all()
+        else:
+            win=tk.Toplevel(self);win.title('加入单词本');win.geometry('380x180')
+            choice=tk.StringVar(value=self.book_ids_names.get(self.book_id,'默认单词本'))
+            ttk.Combobox(win,textvariable=choice,values=list(self.book_name_ids),state='readonly').pack(fill='x',padx=16,pady=20)
+            def save():
+                try:notebooks.add(self.db,self.book_name_ids[choice.get()],selected);win.destroy();self.refresh_all()
+                except Exception as exc:messagebox.showerror('收录失败',str(exc))
+            ttk.Button(win,text=f'加入 {len(selected)} 个词',command=save).pack()
     def refresh_words(self):
-        if not hasattr(self,"word_grid"):return
-        for child in self.word_grid.winfo_children():child.destroy()
-        q=self.word_search.get().lower() if hasattr(self,"word_search") else "";shown=0
-        for r in self.db.execute("SELECT word,content FROM words ORDER BY word"):
-            content=json.loads(r["content"]);scenes="、".join(x[0] for x in self.db.execute("SELECT s.name FROM scenes s JOIN scene_words sw ON sw.scene_id=s.id WHERE sw.word=?",(r["word"],)))
-            if q not in (r["word"]+content.get("meaning","")+scenes).lower():continue
-            word=r["word"];ttk.Button(self.word_grid,text=word,width=14,command=lambda w=word:self.open_word(w)).grid(row=shown//5,column=shown%5,padx=4,pady=4,sticky="ew");shown+=1
-        for column in range(5):self.word_grid.columnconfigure(column,weight=1)
-        if shown==0:self.label(self.word_grid,"还没有单词。" if not q else "没有匹配结果。","Sub.TLabel").grid(row=0,column=0,columnspan=5,sticky="w",pady=12)
-
+        if not hasattr(self,'word_tree'):return
+        selected=set(self.word_tree.selection());self.word_tree.delete(*self.word_tree.get_children())
+        rows=notebooks.words(self.db,self.book_id,self.word_search.get())
+        for row in rows:
+            state='未学习' if row['learned_at'] is None else ('待复习' if row['due']<=date.today().isoformat() else '已学习')
+            self.word_tree.insert('','end',iid=row['word'],text=row['word'],values=(json.loads(row['content']).get('meaning',''),state))
+        self.word_tree.selection_set([r['word'] for r in rows if r['word'] in selected])
+        allrows=notebooks.words(self.db,self.book_id)
+        self.book_summary.set(f"共 {len(allrows)} 词 · 未学 {sum(r['learned_at'] is None for r in allrows)} · 到期 {sum(r['learned_at'] is not None and r['due']<=date.today().isoformat() for r in allrows)} · 当前显示 {len(rows)}")
     def selected_word(self):return self.current_word
-    def open_word(self,word):self.current_word=word;self.word_detail(word)
+    def open_selected_word(self):
+        selected=self.word_tree.selection()
+        if selected:self.open_word(selected[0])
+    def open_word(self,word):self.current_word=word;self.learning_scope=None;self.word_detail(word)
     def start_learning_sequence(self):
-        row=self.db.execute("SELECT word FROM words WHERE mastery<1 ORDER BY CASE WHEN learned_at IS NULL THEN 0 ELSE 1 END,word LIMIT 1").fetchone()
-        if row:self.open_word(row[0])
-        else:messagebox.showinfo("学习完成","还没有单词，请先导入。" if not self.db.execute("SELECT 1 FROM words LIMIT 1").fetchone() else "所有单词都已熟悉。")
-
+        self.learning_scope=[r['word'] for r in notebooks.words(self.db,self.book_id,self.word_search.get()) if r['mastery']<1]
+        self.next_learning_word()
+    def next_learning_word(self):
+        if self.learning_scope is None:
+            self.learning_scope=[r['word'] for r in notebooks.words(self.db,self.book_id,self.word_search.get()) if r['mastery']<1]
+        while self.learning_scope:
+            word=self.learning_scope.pop(0);row=self.db.execute('SELECT mastery FROM words WHERE word=?',(word,)).fetchone()
+            if row and row[0]<1:self.current_word=word;self.word_detail(word);return
+        messagebox.showinfo('学习完成','当前范围内没有待学习的词。')
     def mark_familiar_next(self,word,window=None):
         with self.db:self.db.execute("UPDATE words SET mastery=1,learned_at=COALESCE(learned_at,?),stage=CASE WHEN learned_at IS NULL THEN 0 ELSE stage END,due=CASE WHEN learned_at IS NULL THEN ? ELSE due END WHERE word=?",(__import__('datetime').datetime.now().isoformat(),(date.today()+timedelta(days=1)).isoformat(),word))
         if window and window.winfo_exists():window.destroy()
-        self.refresh_words();row=self.db.execute("SELECT word FROM words WHERE mastery<1 AND word<>? ORDER BY CASE WHEN word>? THEN 0 ELSE 1 END,word LIMIT 1",(word,word)).fetchone()
-        if row:self.open_word(row[0])
-        else:messagebox.showinfo("学习完成","所有单词都已熟悉，并已加入记忆曲线。")
+        self.refresh_words();self.next_learning_word()
+    def review_current_book(self):
+        self.review_book_id=self.book_id;self.refresh_books();self.refresh_review();self.tabs.select(self.review_tab)
+    def export_backup(self):
+        if self.busy:return messagebox.showinfo('请稍候','请等当前 AI 请求完成后备份。')
+        path=filedialog.asksaveasfilename(defaultextension='.json',initialfile=f'情境词卡-{date.today()}.json',filetypes=[('JSON','*.json')])
+        if path:
+            try:Path(path).write_text(json.dumps(backup.export_data(self.db),ensure_ascii=False,indent=2),encoding='utf-8');messagebox.showinfo('已导出','完整词库已导出，不含 API 配置和密钥。')
+            except Exception as exc:messagebox.showerror('导出失败',str(exc))
+    def restore_backup(self):
+        if self.busy:return messagebox.showinfo('请稍候','请等当前 AI 请求完成后恢复。')
+        path=filedialog.askopenfilename(filetypes=[('JSON','*.json')])
+        if not path:return
+        try:
+            data=json.loads(Path(path).read_text(encoding='utf-8-sig'))
+            if isinstance(data,list):
+                if messagebox.askyesno('导入旧版备份','合并旧版单词，已有词保留当前进度？'):backup.import_legacy(self.db,data)
+            else:
+                backup.validate(data)
+                count=len(data['tables']['words'])
+                if not messagebox.askyesno('恢复完整备份',f'将用备份中的 {count} 个单词及全部记录替换当前词库。请先导出当前备份。API 配置和密钥保留。是否恢复？'):return
+                backup.restore(self.db,data)
+            self.book_id=0;self.review_book_id=0;self.learning_scope=None;self.batch=None;self.preview=None;self.refresh_all()
+        except Exception as exc:messagebox.showerror('恢复失败',str(exc))
 
     def word_detail(self,word=None):
         word=word or self.selected_word()
@@ -246,9 +363,15 @@ class App(tk.Tk):
     def mark_memory_familiar(self,word):self.mark_familiar_next(word,self.memory_win)
 
     def _build_review(self):
-        frame=ttk.Frame(self.review_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"今天复习","Title.TLabel").pack(anchor="w");self.review_text=tk.Text(frame,wrap="word",font=("Microsoft YaHei UI",12),state="disabled");self.review_text.pack(fill="both",expand=True,pady=10);self.review_answer=tk.StringVar();ttk.Entry(frame,textvariable=self.review_answer,font=("Microsoft YaHei UI",12)).pack(fill="x",pady=(0,8));bar=ttk.Frame(frame);bar.pack();self.review_submit=ttk.Button(bar,text="提交给 AI 评判",command=self.reveal_review);self.review_submit.pack(side="left");self.review_next=ttk.Button(bar,text="继续下一个乱序复习",command=self.refresh_review,state="disabled");self.review_next.pack(side="left",padx=8)
+        frame=ttk.Frame(self.review_tab,padding=16);frame.pack(fill="both",expand=True);self.label(frame,"今天复习","Title.TLabel").pack(anchor="w")
+        self.review_book_choice=tk.StringVar();self.review_book_box=ttk.Combobox(frame,textvariable=self.review_book_choice,state="readonly");self.review_book_box.pack(fill="x",pady=8)
+        self.review_book_box.bind("<<ComboboxSelected>>",lambda e:self.select_review_book())
+        self.review_text=tk.Text(frame,wrap="word",font=("Microsoft YaHei UI",12),state="disabled");self.review_text.pack(fill="both",expand=True,pady=10);self.review_answer=tk.StringVar();ttk.Entry(frame,textvariable=self.review_answer,font=("Microsoft YaHei UI",12)).pack(fill="x",pady=(0,8));bar=ttk.Frame(frame);bar.pack();self.review_submit=ttk.Button(bar,text="提交给 AI 评判",command=self.reveal_review);self.review_submit.pack(side="left");self.review_next=ttk.Button(bar,text="继续下一个乱序复习",command=self.refresh_review,state="disabled");self.review_next.pack(side="left",padx=8)
+    def select_review_book(self):
+        self.review_book_id=self.book_name_ids.get(self.review_book_choice.get(),0);self.refresh_review()
     def refresh_review(self):
-        self.review_row=self.db.execute("SELECT * FROM words WHERE learned_at IS NOT NULL AND due<=? ORDER BY RANDOM() LIMIT 1",(date.today().isoformat(),)).fetchone();self.review_answer.set("");self.review_next.configure(state="disabled");self.review_submit.configure(state="normal")
+        due=notebooks.words(self.db,self.review_book_id,due_only=True)
+        self.review_row=random.choice(due) if due else None;self.review_answer.set("");self.review_next.configure(state="disabled");self.review_submit.configure(state="normal")
         if self.review_row:
             self.review_question=f"请不用照抄词卡，用自己的话解释 “{self.review_row['word']}” 的核心含义，并写一个自然的英文例句。";self._set_review(self.review_question+"\n\n可以用中文解释；提交后由 AI 评判并自动安排下次复习。")
         else:self._set_review("今天没有到期复习。只有学完并加入记忆曲线的单词才会出现在这里。")
@@ -313,7 +436,7 @@ class App(tk.Tk):
             with self.db:self.db.execute("DELETE FROM api_profiles WHERE name=?",(p["name"],));self.db.execute("UPDATE api_profiles SET is_active=1 WHERE name=(SELECT name FROM api_profiles ORDER BY name LIMIT 1)")
             self.load_api()
 
-    def refresh_all(self):self.refresh_scenes();self.refresh_words();self.refresh_review()
+    def refresh_all(self):self.refresh_books();self.refresh_scenes();self.refresh_words();self.refresh_review()
     def close(self):self.db.close();self.destroy()
 
 if __name__=="__main__":App().mainloop()
